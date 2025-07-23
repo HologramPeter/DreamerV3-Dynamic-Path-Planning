@@ -19,6 +19,7 @@ class DreamerV3():
     #region Training
     def forward(self, obs, actions):
         seq_len = obs.size(0)
+
         embeds = []
         for t in range(seq_len):
             embeds.append(self.encoder(obs[t]))
@@ -155,11 +156,11 @@ class Encoder(nn.Module):
     def __init__(self, input_dim, embed_dim):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(input_dim, 64),
+            nn.Linear(input_dim, 128),
             nn.ReLU(),
-            nn.Linear(64, 32),
+            nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(32, embed_dim)
+            nn.Linear(64, embed_dim)
         )
 
     def forward(self, x):
@@ -179,10 +180,18 @@ class RSSM(nn.Module):
         self.rnn = nn.GRUCell(stoch_dim + embed_dim + action_dim, deter_dim)
 
         #input deter state => output prior stoch distribution
-        self.fc_prior = nn.Linear(deter_dim, 2 * stoch_dim)
+        self.fc_prior = nn.Sequential(
+            nn.Linear(deter_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 2 * stoch_dim)
+        )
 
         #input deter state + obs => output posterior stoch distribution
-        self.fc_posterior = nn.Linear(deter_dim + embed_dim, 2 * stoch_dim)
+        self.fc_posterior = nn.Sequential(
+            nn.Linear(deter_dim + embed_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 2 * stoch_dim)
+        )
 
     def init_state(self, batch_size, device):
         return RSSMState(
@@ -200,8 +209,17 @@ class RSSM(nn.Module):
         return mean + eps * std
     
     def img_step(self, prev_state, prev_action):
-        embed = self.zero_embed(prev_action.size(0), device=prev_action.device)
-        return self.obs_step(prev_state, prev_action, embed)
+        embed = self.zero_embed(prev_action.size(0), prev_action.device)
+        x = torch.cat([prev_state.stoch, prev_action, embed], dim=-1)
+        deter_state = self.rnn(x, prev_state.deter)
+        
+        prior_stats = self.fc_prior(deter_state)
+
+        prior_mean, prior_std = torch.chunk(prior_stats, 2, dim=-1)
+        prior_std = F.softplus(prior_std) + 0.1
+        stoch_state = self.sample_stoch(prior_mean, prior_std)
+
+        return RSSMState(deter_state, stoch_state, prior_mean, prior_std)
 
     def obs_step(self, prev_state, prev_action, embed):
         x = torch.cat([prev_state.stoch, prev_action, embed], dim=-1)
@@ -220,11 +238,11 @@ class Decoder(nn.Module):
     def __init__(self, output_dim, latent_dim):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(latent_dim, 32),
+            nn.Linear(latent_dim, 64),
             nn.ReLU(),
-            nn.Linear(32, 64),
+            nn.Linear(64, 128),
             nn.ReLU(),
-            nn.Linear(64, output_dim),
+            nn.Linear(128, output_dim),
             nn.Tanh()  # to match original range [-1, 1]
         )
     
