@@ -173,16 +173,16 @@ def main(mode, models, name,
             raise ValueError("Model path must be provided for Dreamer mode.")
 
         dreamer_v3 = DreamerV3(
-            embed_dim=32,
+            embed_dim=128,
             obs_dim=14,
             action_dim=2,
-            deter_dim=128,
-            stoch_dim=32,
+            deter_dim=256,
+            stoch_dim=64,
             device=torch.device("cpu")
         )
 
-        # dreamer_v3.load(dreamer_path)
-        # print(f"Dreamer model loaded from {dreamer_path}")
+        dreamer_v3.load(dreamer_path)
+        print(f"Dreamer model loaded from {dreamer_path}")
         
         agents = []
         for agent_path in models:
