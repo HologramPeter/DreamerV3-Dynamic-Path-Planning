@@ -114,6 +114,7 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         self.obstacle_node = None
         self.goal_node = None
         self.robot_node = None
+        self.four_obstacles = False  # whether to use 4 obstacles or not
 
         # Tools
         self.keyboard = self.getKeyboard()
@@ -122,7 +123,7 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         root = self.getRoot()
         self.children_field = root.getField('children')
         self.green_line_node = None
-        self.red_line_node = None
+        self.red_line_nodes = []
         #endregion
     
     def setRewardFunction(self, reward_func):
@@ -140,12 +141,22 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
     
     def close(self):
         return
+    
+    def setMultiObstacles(self, multi_obstacles):
+        self.four_obstacles = multi_obstacles
      
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
 
         #region RESET SIMULATION
-        
+        if self.green_line_node is not None:
+            self.children_field.removeMF(self.green_line_node)
+            self.green_line_node = None
+
+        for _ in self.red_line_nodes:
+            self.children_field.removeMF(-1)
+        self.red_line_nodes = []
+
         # Reset the simulation
         self.simulationResetPhysics()
         self.simulationReset()
@@ -187,6 +198,8 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
 
         self.goal_node.getField('translation').setSFVec3f([0.0, 0.0, 0.0])
 
+        # robot_x = np.random.uniform(-half_size+0.5, -half_size-0.5)
+        # robot_y = np.random.uniform(half_size+0.5, half_size-0.5)
         if np.random.rand() < 0.5:
             robot_x = np.random.choice([-half_size, half_size])
             robot_y = np.random.uniform(-half_size, half_size)
@@ -200,23 +213,32 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
             #first obstacle is chosen between robot and goal
             if first:
                 first = False
-                obstacle_x = robot_x / 2.0
-                obstacle_y = robot_y / 2.0
+                obstacle_x = robot_x / 2.0 + np.random.uniform(-0.3, 0.3)
+                obstacle_y = robot_y / 2.0 + np.random.uniform(-0.3, 0.3)
+                obstacle_info.randomiseSpeed(2.5/1000, np.random.randint(150, 250))
             else:
-                distance = -1
-                while distance < 0.5 or distance > 2.0:
-                    #pick a random position for the obstacle within self.bounds
-                    obstacle_x = np.random.uniform(-obstacle_half_size, obstacle_half_size)
-                    obstacle_y = np.random.uniform(-obstacle_half_size, obstacle_half_size)
-                    distance = np.linalg.norm(np.array([robot_x, robot_y]) - np.array([obstacle_x, obstacle_y]))
+                obstacle_x = 100
+                obstacle_y = 100
+                distance = 0
+                if self.four_obstacles:
+                    while distance < 0.5 or distance > 2.0:
+                        #pick a random position for the obstacle within self.bounds
+                        obstacle_x = np.random.uniform(-obstacle_half_size, obstacle_half_size)
+                        obstacle_y = np.random.uniform(-obstacle_half_size, obstacle_half_size)
+                        distance = np.linalg.norm(np.array([robot_x, robot_y]) - np.array([obstacle_x, obstacle_y]))
+                    obstacle_info.randomiseSpeed(2.5/1000, np.random.randint(150, 250))
 
-            obstacle_info.randomiseSpeed(5/1000, np.random.randint(150, 250))
+            # obstacle_info.randomiseSpeed(2.5/1000, np.random.randint(150, 250))
+            # obstacle_info.randomiseSpeed(0, np.random.randint(150, 250))
             obstacle_info.set_position(obstacle_x, obstacle_y)
             obstacle_node.getField('translation').setSFVec3f([obstacle_x, obstacle_y, 0.0])
-
+        
+        
+        self.robot_node.resetPhysics()
         #turn the robot to face the goal
         rotation = self.robot_node.getOrientation()
-        robot_heading = np.arctan2(rotation[3], rotation[4])
+        # robot_heading = np.arctan2(rotation[3] + np.random.rand()-0.5, rotation[4]+ np.random.rand()-0.5)
+        robot_heading = np.arctan2(rotation[3], rotation[4]) #TEMP
         goal_heading = np.arctan2(-robot_y, -robot_x)
 
         heading_diff = (goal_heading - robot_heading + np.pi) % (2 * np.pi) - np.pi
@@ -269,6 +291,7 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
                 sector_readings = np.concatenate((lidar_ranges[start:], lidar_ranges[:end]))
             else:
                 sector_readings = lidar_ranges[start:end]
+
             min_i = np.argmin(sector_readings)
             encoded_readings[i] = np.clip(sector_readings[min_i]/self.maxReading, 0, 1)  # minimum reading in the sector
             encoded_readings[i + self.sector_count] = (min_i - self.sector_size_half) / self.sector_size_half  # bearing to the minimum reading in the sector
@@ -331,20 +354,32 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
 
         # Reward
         reward = self.reward_func(self.state)
-        if terminated:
-            reward += 100.0 if goal_reached else -400.0
-        reward -= 1e-2 * (self.step_lapsed // 10)  # time penalty
+        if collision:
+            reward -= 100.0
+        elif goal_reached:
+            reward += 100.0
+        elif out_of_bounds or truncated:
+            reward -= 30.0
 
-        return self.state.astype(np.float32), reward, terminated, truncated, {'success': goal_reached, 'collision': collision, 'out_of_bounds': out_of_bounds}
-    
-    def drawLines(self, green=[], red=[]):
-        if self.red_line_node is not None:
-            self.children_field.removeMF(self.red_line_node)
-            self.red_line_node = None
+        reward -= 5e-3 * self.step_lapsed  # time penalty
 
+        return (self.state.astype(np.float32),
+                reward, terminated, truncated,
+                {'success': goal_reached,
+                 'collision': collision,
+                 'out_of_bounds': out_of_bounds,
+                 'heading': robot_heading,
+                 }
+               )
+
+    def drawLines(self, green=[], reds=[]):
         if self.green_line_node is not None:
-            self.children_field.removeMF(self.green_line_node)
+            self.children_field.removeMF(-1)
             self.green_line_node = None
+
+        while len(self.red_line_nodes) > 0:
+            self.red_line_nodes.pop(0)
+            self.children_field.removeMF(-1)
 
         line_proto = """
         DEF LineShape Shape {
@@ -366,20 +401,19 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         }
         """
 
+        for red in reds:
+            point_str = ', '.join(['%f %f %f' % tuple(p) for p in red])
+            index_str = ', '.join(str(i) for i in range(len(red)))# + ', -1'
+            line_node_string = line_proto % (point_str, index_str, '1 0 0')
+            self.children_field.importMFNodeFromString(-1, line_node_string)
+            self.red_line_nodes.append(self.children_field.getCount() - 1)
 
         if len(green) >= 2:
             point_str = ', '.join(['%f %f %f' % tuple(p) for p in green])
-            index_str = ', '.join(str(i) for i in range(len(green))) + ', -1'
+            index_str = ', '.join(str(i) for i in range(len(green)))## + ', -1'
             line_node_string = line_proto % (point_str, index_str, '0 1 0')
             self.children_field.importMFNodeFromString(-1, line_node_string)
             self.green_line_node = self.children_field.getCount() - 1
-
-        if len(red) >= 2:
-            point_str = ', '.join(['%f %f %f' % tuple(p) for p in red])
-            index_str = ', '.join(str(i) for i in range(len(red))) + ', -1'
-            line_node_string = line_proto % (point_str, index_str, '1 0 0')
-            self.children_field.importMFNodeFromString(-1, line_node_string)
-            self.red_line_node = self.children_field.getCount() - 1
 
 class ObstacleInfo:
     def __init__(self, x, y):

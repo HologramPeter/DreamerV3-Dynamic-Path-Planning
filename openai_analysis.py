@@ -1,7 +1,7 @@
 import numpy as np
 
 #open webots_gym.log to read the log
-log_file = open('data/webots_gym.log', 'r')
+log_file = open('data_wk9/webots_gym.log', 'r')
 
 #read csv file into a numpy array
 data = {}
@@ -14,7 +14,7 @@ for line in log_file:
     key = parts[0]
     average_reward = float(parts[2])
     steps = int(parts[3])
-    success = parts[4] == 'True'
+    success = int(parts[4])
 
     if key not in data:
         data[key] = ([], [], [])  # Initialize with empty lists for rewards, steps, and success
