@@ -5,10 +5,26 @@ import datetime
 def generateFileName(prefix):
     return f"{prefix}_{datetime.datetime.now().strftime('%m%d_%H%M')}.zip"
 
+class NullCallback(BaseCallback):
+    def __init__(self, record_path, verbose=False):
+        super().__init__(verbose)
+
+    def _verbose(self, msg):
+        return
+
+    def _on_step(self) -> bool:
+        return True
+    
+    def nextRollout(self):
+        return
+    
+    def close(self):
+        return
+
 class SaveObsCallback(BaseCallback):
     def __init__(self, record_path, verbose=False):
         super().__init__(verbose)
-        self.file = open(record_path, 'w')
+        self.file = open(record_path, 'a')
         self.seq = np.array([[0]])
         self.rollout = np.array([[0]])
 
@@ -39,6 +55,16 @@ class SaveObsCallback(BaseCallback):
             self.rollout[0][0] += 1
             self.seq[0][0] = 0
             self._verbose(f"Finished Rollout {self.rollout}")
+    
+    def nextRollout(self):
+        self.file.flush()
+        self.rollout[0][0] += 1
+        self.seq[0][0] = 0
+        self._verbose(f"Next Rollout {self.rollout}")
+    
+    def close(self):
+        self.file.close()
+        self._verbose("File closed")
 
 
 class DataSampler:

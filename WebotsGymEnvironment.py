@@ -142,8 +142,10 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
     def close(self):
         return
     
-    def setMultiObstacles(self, multi_obstacles):
-        self.four_obstacles = multi_obstacles
+    def setObstacleConfig(self, obstacle_count, speed, epsilon=0.25):
+        self.epsilon = epsilon
+        self.obstacle_count = min(obstacle_count, 4)  # limit to 4 obstacles
+        self.obstacle_speed = speed / 1000
      
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -208,37 +210,36 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
             robot_y = np.random.choice([-half_size, half_size])
         self.robot_node.getField('translation').setSFVec3f([robot_x, robot_y, 0.0])
 
-        first = True
+        obstacle_configured_count = 0
+        middle_obstacle = np.random.rand() < self.epsilon
         for obstacle_node, obstacle_info in self.obstacle_nodes:
-            #first obstacle is chosen between robot and goal
-            if first:
-                first = False
-                obstacle_x = robot_x / 2.0 + np.random.uniform(-0.3, 0.3)
-                obstacle_y = robot_y / 2.0 + np.random.uniform(-0.3, 0.3)
-                obstacle_info.randomiseSpeed(2.5/1000, np.random.randint(150, 250))
-            else:
+            if obstacle_configured_count >= self.obstacle_count:
                 obstacle_x = 100
                 obstacle_y = 100
-                distance = 0
-                if self.four_obstacles:
+            else:
+                if middle_obstacle:
+                    #place obstacle between robot and goal
+                    obstacle_x = (robot_x + self.target[0]) / 2 + np.random.uniform(-0.1, 0.1)
+                    obstacle_y = (robot_y + self.target[1]) / 2 + np.random.uniform(-0.1, 0.1)
+                    middle_obstacle = False
+                else:
+                    distance = 0
                     while distance < 0.5 or distance > 2.0:
                         #pick a random position for the obstacle within self.bounds
                         obstacle_x = np.random.uniform(-obstacle_half_size, obstacle_half_size)
                         obstacle_y = np.random.uniform(-obstacle_half_size, obstacle_half_size)
                         distance = np.linalg.norm(np.array([robot_x, robot_y]) - np.array([obstacle_x, obstacle_y]))
-                    obstacle_info.randomiseSpeed(2.5/1000, np.random.randint(150, 250))
-
-            # obstacle_info.randomiseSpeed(2.5/1000, np.random.randint(150, 250))
-            # obstacle_info.randomiseSpeed(0, np.random.randint(150, 250))
+                obstacle_info.randomiseSpeed(self.obstacle_speed, np.random.randint(150, 250))
             obstacle_info.set_position(obstacle_x, obstacle_y)
             obstacle_node.getField('translation').setSFVec3f([obstacle_x, obstacle_y, 0.0])
+            obstacle_configured_count += 1
         
         
         self.robot_node.resetPhysics()
         #turn the robot to face the goal
         rotation = self.robot_node.getOrientation()
-        # robot_heading = np.arctan2(rotation[3] + np.random.rand()-0.5, rotation[4]+ np.random.rand()-0.5)
-        robot_heading = np.arctan2(rotation[3], rotation[4]) #TEMP
+        robot_heading = np.arctan2(rotation[3] + np.random.rand()-0.5, rotation[4]+ np.random.rand()-0.5)
+        # robot_heading = np.arctan2(rotation[3], rotation[4]) #TEMP
         goal_heading = np.arctan2(-robot_y, -robot_x)
 
         heading_diff = (goal_heading - robot_heading + np.pi) % (2 * np.pi) - np.pi
@@ -361,7 +362,7 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         elif out_of_bounds or truncated:
             reward -= 30.0
 
-        reward -= 5e-3 * self.step_lapsed  # time penalty
+        reward -= 0.01 * self.step_lapsed  # time penalty
 
         return (self.state.astype(np.float32),
                 reward, terminated, truncated,

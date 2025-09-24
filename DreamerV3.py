@@ -77,44 +77,44 @@ class DreamerV3():
         obs = torch.tensor(obs, dtype=torch.float32).view(1, -1)
         action = torch.tensor(action, dtype=torch.float32).view(1, -1)
 
+        self.state = self.rssm.obs_step(self.state, action, self.encoder(obs))
+
         if self.current_policy_horizon > 0:
             self.current_policy_horizon -= 1
             action = self.policies[self.current_policy_index](obs)
             # reshape (1,action_dim) to (action_dim,)
             action = action.squeeze()
             return action, {}
+        else:
+            self.current_policy_horizon = self.horizon
 
-        self.current_policy_horizon = self.horizon
-        # self.current_policy_horizon = 30
+            info = {}
+            best_index = 0
+            best_reward = float('-inf')
+            # best_action = None
 
-        info = {}
-        best_index = 0
-        best_reward = float('-inf')
-        best_action = None
+            #encoder input shape: (1, 1, obs_dim), obs_step shape (1, 1, channel)
 
-        #encoder input shape: (1, 1, obs_dim), obs_step shape (1, 1, channel)
-        self.state = self.rssm.obs_step(self.state, action, self.encoder(obs))
+            for i, policy in enumerate(self.policies):
+                imagined_seq = self.imagine(policy, action, obs, heading, self.horizon, self.state)
+                # get accumulated reward
+                reward = [self.reward_func(imagined_obs) for imagined_obs in imagined_seq]
+                total_reward = sum(reward)
 
-        for i, policy in enumerate(self.policies):
-            imagined_seq = self.imagine(policy, action, obs, heading, self.horizon, self.state)
-            # get accumulated reward
-            reward = [self.reward_func(imagined_obs) for imagined_obs in imagined_seq]
-            total_reward = sum(reward)
+                if total_reward > best_reward:
+                    best_reward = total_reward
+                    best_index = i
+                    # best_action = action
 
-            if total_reward > best_reward:
-                best_reward = total_reward
-                best_index = i
-                best_action = action
+                info[i] = {'imagined_obs_seq': imagined_seq, 'reward': total_reward}
+            print(f"Best policy index: {best_index}")
+            action = self.policies[best_index](obs)
+            # reshape (1,action_dim) to (action_dim,)
+            action = action.squeeze()
 
-            info[i] = {'imagined_obs_seq': imagined_seq, 'reward': total_reward}
-        print(f"Best policy index: {best_index}")
-        action = self.policies[best_index](obs)
-        # reshape (1,action_dim) to (action_dim,)
-        action = action.squeeze()
+            self.current_policy_index = best_index
 
-        self.current_policy_index = best_index
-
-        return action, info
+            return action, info
 
     def infer_obs(self, prev_action, prev_state, heading, decoded_obs):
         left_motor_speed = prev_action[0][0] * self.max_wheel_speed
@@ -138,7 +138,6 @@ class DreamerV3():
       w = self.wheel_radius * (v_right - v_left) / self.wheel_base
 
       return v, w
-
 
     def imagine(self, policy, action, obs, heading, horizon, state):
         seq = [obs.detach().squeeze().numpy()]
