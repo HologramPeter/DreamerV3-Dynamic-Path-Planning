@@ -17,53 +17,69 @@ from controller import Supervisor
 
 import gymnasium as gym
 import numpy as np
+from WebotsObstacles import *
+from WebotsLines import *
 
-#if lidar detect anything, use the RL agent to control the robot
-#RL agent resets if it cannot avoid obstacle within 20 x 20 bound
-#else, follow heading to the goal
 
-#current state deal with 1 obstacle
+#TODO: add continous action space option
+getPosition = lambda node: node.getField('translation').getSFVec3f()[:2]
+setPosition = lambda node, pos: node.getField('translation').setSFVec3f([pos[0], pos[1], 0.0])
+getRotation = lambda node: extractHeadingAngle(node.getField('rotation').getSFRotation())
+setRotation = lambda node, heading: node.getField('rotation').setSFRotation([0.0, 0.0, 1.0, heading])
 
+def extractHeadingAngle(sfRotation):
+    ax, ay, az, angle = sfRotation
+    # For Z-axis rotation, heading is angle * axis_z
+    heading = angle * az
+    # Normalize to [-pi, pi]
+    heading = (heading + np.pi) % (2 * np.pi) - np.pi
+    return heading
+
+class EnvConfig:
+    def __init__(self,
+                 bounds_threshold,
+                 collision_threshold,
+                 obstacle_config,
+                 max_episode_steps=1000,
+                 reward_func=None):
+        self.bounds_threshold = bounds_threshold
+        self.collision_threshold = collision_threshold
+        self.max_episode_steps = max_episode_steps
+        self.obstacle_config = obstacle_config
+
+        if reward_func is not None:
+            self.reward_func = reward_func 
+        else:
+            self.reward_func = lambda obs: 0.0
 
 class WebotsGymEnvironment(Supervisor, gym.Env):
-    DEFAULT_REWARD_FUNCTION = lambda obs: 0.0  # Default reward function
-
-    def __init__(self, reward_func=DEFAULT_REWARD_FUNCTION, max_episode_steps=1000):
+    def __init__(self, config: EnvConfig):
         super().__init__()
 
-        #region CONFIGURATION
-        # lidar = self.getSelf().getDevice("LDS-01")
-        # self.__resolution = lidar.getHorizontalResolution()
-        # self.__fov = lidar.getFov()
-        # self.__maxRange = lidar.getMaxRange()
-
-        # left_motor = self.getSelf().getDevice('left wheel motor')
-        # motor_threshold = left_motor.getMaxVelocity()
-
-        #ROBOT CONFIG
+        #region ROBOT CONFIG
         self.resolution = 360
         self.motor_threshold = 6.67
-        self.lidar_angle = 2 * np.pi / self.resolution  # angle per lidar reading
-        self.sector_count = 4  # 4 sectors: front, left, rear, right
+        # self.lidar_angle = 2 * np.pi / self.resolution  # angle per lidar reading
+        self.lidar_angle = 1 / self.resolution  # angle per lidar reading
+        self.sector_count = 16  # number of sectors to divide the lidar readings into
 
         sector_size = self.resolution // self.sector_count
         self.sector_size_half = sector_size // 2  # half sector size for bearing calculation
-        self.sectors = [(i*sector_size-self.sector_size_half, i*sector_size+self.sector_size_half) for i in range(self.sector_count)]
+        # self.sectors = [(i*sector_size-self.sector_size_half, i*sector_size+self.sector_size_half) for i in range(self.sector_count)]
 
         lidar_maxRange = 3.5
         self.wheel_radius = 0.033
         self.wheel_base = 0.16
-        self.collision_threshold = 0.2  # distance threshold for collision detection
-        self.bounds_threshold = 3
-
         self.maxRange = lidar_maxRange
-        self.maxReading = lidar_maxRange + 1  # +1 for infinite ranges
-        self.target = np.array([0.0, 0.0])
 
-        self.reward_func = reward_func
+
+        self.bounds_threshold = config.bounds_threshold  # x,y bounds for the robot
+        self.collision_threshold = config.collision_threshold  # distance threshold for collision detection
+        self.reward_func = config.reward_func
 
         self.v_high = self.motor_threshold * self.wheel_radius # linear velocity
         self.w_high = 2 * self.motor_threshold * self.wheel_radius / self.wheel_base # angular velocity
+        self.target = np.array([self.bounds_threshold, 0.0])  # target position
 
         #TRAIN CONFIG
         ### To be added
@@ -79,21 +95,21 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
 
         obs_low = np.array(
             [
-                -1, -1,
-                -1, -1, #x, y coord from goal
-                -1, -1 #sin, cos of robot heading relative to goal
-            # ] + [0] * self.resolution,
-            ] + [0] * self.sector_count + [-1] * self.sector_count,
+                1, 1, #linear, angular velocity 
+                1, 1, #x, y coord
+                1, 1, #sin, cos of robot heading
+                1, 1  #sin, cos of goal heading
+            ] + [0] * (self.sector_count * 2),
             dtype=np.float32
         )
 
         obs_high = np.array(
             [
-                1, 1,
-                1, 1, #x, y coord from goal
-                1, 1 #sin, cos of robot heading relative to goal
-            # ] + [self.maxReading] * self.resolution,
-             ] + [1] * self.sector_count + [1] * self.sector_count, #the no-obstacle reading
+                1, 1, #linear, angular velocity 
+                1, 1, #x, y coord
+                1, 1, #sin, cos of robot heading
+                1, 1  #sin, cos of goal heading
+            ] + [1] * (self.sector_count * 2),
             dtype=np.float32
         )
         
@@ -102,8 +118,8 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         #endregion
 
         #region ENV INIT
-        self.spec = gym.envs.registration.EnvSpec(id='WebotsEnv-v0', max_episode_steps=max_episode_steps)
-        self.state = None
+        self.spec = gym.envs.registration.EnvSpec(id='WebotsEnv-v0', max_episode_steps=config.max_episode_steps)
+        self.obs = None
 
         # Environment specific
         self.__timestep = int(self.getBasicTimeStep())
@@ -111,66 +127,47 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         self.__right_motor = None
         self.__lidar_sensor = None
 
-        self.obstacle_node = None
         self.goal_node = None
         self.robot_node = None
-        self.four_obstacles = False  # whether to use 4 obstacles or not
 
+        print(f"Time step: {self.__timestep} ms")
+
+        self.lineManager = LineManager(self.rootChildren())
+        self.obstacleManager = ObstacleManager(self.rootChildren(), config=config.obstacle_config)
+        self.obstacleManager.setCollisionThreshold(self.collision_threshold)
+        
         # Tools
         self.keyboard = self.getKeyboard()
         self.keyboard.enable(self.__timestep)
-
-        root = self.getRoot()
-        self.children_field = root.getField('children')
-        self.green_line_node = None
-        self.red_line_nodes = []
         #endregion
+
+    def seed(self, seed=None):
+        np.random.seed(seed)
+
+    def rootChildren(self):
+        return self.getRoot().getField('children')
     
     def setRewardFunction(self, reward_func):
         self.reward_func = reward_func
 
+    def setObstacleConfig(self, obstacle_config):
+        self.obstacleManager.setConfig(obstacle_config)
+
     def wait_keyboard(self):
         while self.keyboard.getKey() != ord('Y'):
             super().step(self.__timestep)
-    
-    def seed(self, seed=None):
-        np.random.seed(seed)
         
     def render(self):
         return
     
     def close(self):
         return
-    
-    def setObstacleConfig(self, obstacle_count, speed, epsilon=0.25):
-        self.epsilon = epsilon
-        self.obstacle_count = min(obstacle_count, 4)  # limit to 4 obstacles
-        self.obstacle_speed = speed / 1000
      
-    def reset(self, *, seed=None, options=None):
+    def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        #region RESET SIMULATION
-        if self.green_line_node is not None:
-            self.children_field.removeMF(self.green_line_node)
-            self.green_line_node = None
-
-        for _ in self.red_line_nodes:
-            self.children_field.removeMF(-1)
-        self.red_line_nodes = []
-
-        # Reset the simulation
-        self.simulationResetPhysics()
-        self.simulationReset()
-        super().step(self.__timestep)
-
+        #region Reset the simulation
         # Objects
-        self.obstacle_nodes = [
-            (self.getFromDef("OBSTACLE1"), ObstacleInfo(0, 0)),
-            (self.getFromDef("OBSTACLE2"), ObstacleInfo(0, 0)),
-            (self.getFromDef("OBSTACLE3"), ObstacleInfo(0, 0)),
-            (self.getFromDef("OBSTACLE4"), ObstacleInfo(0, 0)),
-        ]
         self.goal_node = self.getFromDef("GOAL")
         self.robot_node = self.getFromDef("ROBOT")
 
@@ -187,115 +184,61 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         self.__lidar_sensor = self.getDevice("LDS-01")
         self.__lidar_sensor.enable(self.__timestep)
 
-        # Internals
+        # Physics
+        self.simulationResetPhysics()
         super().step(self.__timestep)
 
         #endregion
 
-        #region RANDOMIZE INITIAL STATE
-
-        # randomize iniitial state
-        half_size = 1.0
-        obstacle_half_size = 2
-
-        self.goal_node.getField('translation').setSFVec3f([0.0, 0.0, 0.0])
-
-        # robot_x = np.random.uniform(-half_size+0.5, -half_size-0.5)
-        # robot_y = np.random.uniform(half_size+0.5, half_size-0.5)
-        if np.random.rand() < 0.5:
-            robot_x = np.random.choice([-half_size, half_size])
-            robot_y = np.random.uniform(-half_size, half_size)
-        else:
-            robot_x = np.random.uniform(-half_size, half_size)
-            robot_y = np.random.choice([-half_size, half_size])
-        self.robot_node.getField('translation').setSFVec3f([robot_x, robot_y, 0.0])
-
-        obstacle_configured_count = 0
-        middle_obstacle = np.random.rand() < self.epsilon
-        for obstacle_node, obstacle_info in self.obstacle_nodes:
-            if obstacle_configured_count >= self.obstacle_count:
-                obstacle_x = 100
-                obstacle_y = 100
-            else:
-                if middle_obstacle:
-                    #place obstacle between robot and goal
-                    obstacle_x = (robot_x + self.target[0]) / 2 + np.random.uniform(-0.1, 0.1)
-                    obstacle_y = (robot_y + self.target[1]) / 2 + np.random.uniform(-0.1, 0.1)
-                    middle_obstacle = False
-                else:
-                    distance = 0
-                    while distance < 0.5 or distance > 2.0:
-                        #pick a random position for the obstacle within self.bounds
-                        obstacle_x = np.random.uniform(-obstacle_half_size, obstacle_half_size)
-                        obstacle_y = np.random.uniform(-obstacle_half_size, obstacle_half_size)
-                        distance = np.linalg.norm(np.array([robot_x, robot_y]) - np.array([obstacle_x, obstacle_y]))
-                obstacle_info.randomiseSpeed(self.obstacle_speed, np.random.randint(150, 250))
-            obstacle_info.set_position(obstacle_x, obstacle_y)
-            obstacle_node.getField('translation').setSFVec3f([obstacle_x, obstacle_y, 0.0])
-            obstacle_configured_count += 1
+        #region INITIAL STATE
+        self.lineManager.reset()
+        self.obstacleManager.reset()
+        setPosition(self.goal_node, self.target)
+        init_pos = np.random.uniform(0.0, 0.0, size=2)
+        setPosition(self.robot_node, init_pos)
         
-        
-        self.robot_node.resetPhysics()
-        #turn the robot to face the goal
-        rotation = self.robot_node.getOrientation()
-        robot_heading = np.arctan2(rotation[3] + np.random.rand()-0.5, rotation[4]+ np.random.rand()-0.5)
-        # robot_heading = np.arctan2(rotation[3], rotation[4]) #TEMP
-        goal_heading = np.arctan2(-robot_y, -robot_x)
+        #turn the robot to a random heading
+        robot_heading = np.random.uniform(-np.pi, np.pi)
+        goal_heading = np.arctan2(self.target[1] - init_pos[1],self.target[0] - init_pos[0]) - robot_heading
+        setRotation(self.robot_node, robot_heading)
 
-        heading_diff = (goal_heading - robot_heading + np.pi) % (2 * np.pi) - np.pi
-        self.robot_node.getField('rotation').setSFRotation([0.0, 0.0, 1.0, heading_diff])
-
-        #endregion
-
-        #region INITIALIZE STATE
-
-        self.state = np.array([
-            0.0,  # linear velocity
-            0.0,  # angular velocity
-            robot_x/self.bounds_threshold,  # robot x position
-            robot_y/self.bounds_threshold,  # robot y position
-            np.sin(heading_diff),  # sin of heading diff
-            np.cos(heading_diff),  # cos of heading diff
-        # ] + [self.maxReading] * self.resolution,  # lidar readings
-        ] + [1] * self.sector_count + [1] * self.sector_count,  # lidar readings
+        self.obs = np.array([
+            0.0, 0.0, #linear, angular velocity
+            0.0, 0.0, #x, y coord
+            np.sin(robot_heading), np.cos(robot_heading), #sin, cos of robot heading
+            np.sin(goal_heading), np.cos(goal_heading)  #sin, cos of goal heading
+        ] + [1] * (self.sector_count*2),  # lidar readings
         dtype=np.float32)
         #endregion
 
-        return self.state, {}
+        return self.obs, {}
 
     def get_v_w(self, v_left, v_right):
         v = self.wheel_radius * (v_left + v_right) / 2
         w = self.wheel_radius * (v_right - v_left) / self.wheel_base
         return v, w
-    
-    def checkCollision(self):
-        robot_pos = self.robot_node.getField('translation').getSFVec3f()[:2]
-        for obstacle_node, _ in self.obstacle_nodes:
-            obstacle_pos = obstacle_node.getField('translation').getSFVec3f()[:2]
-            distance = np.linalg.norm(np.array(robot_pos) - np.array(obstacle_pos))
-            if distance < self.collision_threshold:
-                return True
-        return False
 
-    #downsample lidar reading to front,left,right,rear
-    #each sector contains minimum reading, and and bearing to that reading
-
+    #convert to range [0,1] by dividing by maxRange
+    #return spacial coordinates of the min reading in each sector
     def encode_lidar_readings(self, lidar_ranges):
         """
         Encode lidar readings into a more manageable format.
         This function takes the full lidar range readings and encodes them into sectors.
         """
-        encoded_readings = np.zeros(2*self.sector_count, dtype=np.float32)
+        #downsample lidar reading to sector_count by using circular min pooling
+        encoded_readings = np.array([], dtype=np.float32)
+        sector_size = self.resolution // self.sector_count
+        for i in range(self.sector_count):
+            start_idx = i * sector_size
+            end_idx = start_idx + sector_size
+            sector_readings = lidar_ranges[start_idx:end_idx]
+            min_reading_ind = np.argmin(sector_readings)
 
-        for i, (start,end) in enumerate(self.sectors):
-            if i == 0:
-                sector_readings = np.concatenate((lidar_ranges[start:], lidar_ranges[:end]))
-            else:
-                sector_readings = lidar_ranges[start:end]
-
-            min_i = np.argmin(sector_readings)
-            encoded_readings[i] = np.clip(sector_readings[min_i]/self.maxReading, 0, 1)  # minimum reading in the sector
-            encoded_readings[i + self.sector_count] = (min_i - self.sector_size_half) / self.sector_size_half  # bearing to the minimum reading in the sector
+            #append sin and cos of angle multiplied by reading, normalised by maxRange
+            angle = (start_idx + min_reading_ind) * self.lidar_angle
+            distance = min(sector_readings[min_reading_ind], self.maxRange) / self.maxRange
+            encoded_readings = np.append(encoded_readings,
+                                         [angle, distance])
         return encoded_readings
 
     def step(self, action):
@@ -304,12 +247,8 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         right_motor_speed = action[1] * self.motor_threshold
         self.__left_motor.setVelocity(left_motor_speed)
         self.__right_motor.setVelocity(right_motor_speed)
-
-        # move obstacles
-        for obstacle_node, obstacle_info in self.obstacle_nodes:
-            obstacle_x, obstacle_y = obstacle_info.step()
-            obstacle_node.getField('translation').setSFVec3f([obstacle_x, obstacle_y, 0.0])
-            
+        
+        self.obstacleManager.step()
         super().step(self.__timestep)
 
         # Observation
@@ -317,27 +256,33 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         lidar_ranges = self.__lidar_sensor.getRangeImage()
         lidar_ranges = self.encode_lidar_readings(lidar_ranges)
 
-        robot_pos = self.robot_node.getField('translation').getSFVec3f()[:2] - self.target
+        robot_pos = getPosition(self.robot_node)
+        robot_heading = getRotation(self.robot_node)
+        
+        goal_heading = np.arctan2(self.target[1] - robot_pos[1], self.target[0] - robot_pos[0])
+        heading_diff = goal_heading - robot_heading
 
-        rotation = self.robot_node.getOrientation()
-        robot_heading = np.arctan2(rotation[3], rotation[4])
-        goal_heading = np.arctan2(-robot_pos[1], -robot_pos[0])
+        #convert to degrees and round to 2 decimal places
+        # robot_heading_ = round(robot_heading / np.pi * 180, 2)
+        # goal_heading_ = round(goal_heading / np.pi * 180, 2)
+        # print(f"Robot heading: {robot_heading_}, Goal heading: {goal_heading_}")
 
-        heading_diff = (goal_heading - robot_heading + np.pi) % (2 * np.pi) - np.pi
-
-        self.state = np.array([
+        self.obs = np.array([
             linear_velocity/self.v_high,
             angular_velocity/self.w_high,
             robot_pos[0]/self.bounds_threshold,
             robot_pos[1]/self.bounds_threshold,
+            np.sin(robot_heading),
+            np.cos(robot_heading),
             np.sin(heading_diff),
             np.cos(heading_diff),
         ], dtype=np.float32)
-        self.state = np.concatenate((self.state, lidar_ranges))
-        
+        self.obs = np.concatenate((self.obs, lidar_ranges))
+
         # Termination
-        goal_reached = np.linalg.norm(robot_pos) < self.collision_threshold
-        collision = self.checkCollision()
+        goal_reached = robot_pos[0] >= self.target[0] - self.collision_threshold
+
+        collision = self.obstacleManager.checkCollision(robot_pos[0], robot_pos[1])
         out_of_bounds = (
             abs(robot_pos[0]) > self.bounds_threshold or
             abs(robot_pos[1]) > self.bounds_threshold
@@ -354,95 +299,25 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         self.step_lapsed += 1
 
         # Reward
-        reward = self.reward_func(self.state)
+        reward = self.reward_func(self.obs)
         if collision:
             reward -= 100.0
         elif goal_reached:
-            reward += 100.0
+            reward += 30.0
         elif out_of_bounds or truncated:
             reward -= 30.0
 
         reward -= 0.01 * self.step_lapsed  # time penalty
 
-        return (self.state.astype(np.float32),
+        return (self.obs.astype(np.float32),
                 reward, terminated, truncated,
-                {'success': goal_reached,
-                 'collision': collision,
-                 'out_of_bounds': out_of_bounds,
-                 'heading': robot_heading,
-                 }
+                {
+                    'success': goal_reached,
+                    'collision': collision,
+                    'out_of_bounds': out_of_bounds,
+                    'goal_heading': goal_heading,
+                }
                )
-
-    def drawLines(self, green=[], reds=[]):
-        if self.green_line_node is not None:
-            self.children_field.removeMF(-1)
-            self.green_line_node = None
-
-        while len(self.red_line_nodes) > 0:
-            self.red_line_nodes.pop(0)
-            self.children_field.removeMF(-1)
-
-        line_proto = """
-        DEF LineShape Shape {
-            geometry IndexedLineSet {
-                coord Coordinate {
-                point [
-                    %s
-                ]
-                }
-                coordIndex [
-                %s
-                ]
-            }
-            appearance Appearance {
-                material Material {
-                emissiveColor %s
-                }
-            }
-        }
-        """
-
-        for red in reds:
-            point_str = ', '.join(['%f %f %f' % tuple(p) for p in red])
-            index_str = ', '.join(str(i) for i in range(len(red)))# + ', -1'
-            line_node_string = line_proto % (point_str, index_str, '1 0 0')
-            self.children_field.importMFNodeFromString(-1, line_node_string)
-            self.red_line_nodes.append(self.children_field.getCount() - 1)
-
-        if len(green) >= 2:
-            point_str = ', '.join(['%f %f %f' % tuple(p) for p in green])
-            index_str = ', '.join(str(i) for i in range(len(green)))## + ', -1'
-            line_node_string = line_proto % (point_str, index_str, '0 1 0')
-            self.children_field.importMFNodeFromString(-1, line_node_string)
-            self.green_line_node = self.children_field.getCount() - 1
-
-class ObstacleInfo:
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-        self.speed_x = 0
-        self.speed_y = 0
-        self.time = 0
-        self.periodicity = 0
-
-    def randomiseSpeed(self, speed, periodicity):
-        self.speed_x = speed * np.random.uniform(-1, 1)
-        self.speed_y = speed * np.random.uniform(-1, 1)
-        self.periodicity = periodicity
-        self.time = 0
-
-    def step(self):
-        self.x += self.speed_x
-        self.y += self.speed_y
-        self.time += 1
-        if self.time >= self.periodicity:
-            self.speed_x = -self.speed_x
-            self.speed_y = -self.speed_y
-            self.time = 0
-        return self.x, self.y
-
-    def get_position(self):
-        return self.x, self.y
-
-    def set_position(self, x, y):
-        self.x, self.y = x, y
+    
+    def drawLines(self, lines):
+        self.lineManager.drawLines(lines)

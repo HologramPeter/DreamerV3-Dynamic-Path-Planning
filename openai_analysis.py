@@ -1,4 +1,33 @@
 import numpy as np
+import pandas as pd
+
+df_loaded = pd.read_csv("data.csv")
+data = (
+    df_loaded.assign(
+        average_reward=df_loaded["total_reward"] / df_loaded["steps"].replace(0, pd.NA)
+    )
+    .fillna(0)
+    .groupby("model")
+    .agg({
+        "steps": list,
+        "average_reward": list,
+        "success": list,
+        "smoothness": list,
+        "heading_deviation": list
+    })
+    .to_dict("index")
+)
+
+
+
+
+
+
+
+
+
+
+
 
 #open webots_gym.log to read the log
 log_file = open('data_final/webots_gym.log', 'r')
