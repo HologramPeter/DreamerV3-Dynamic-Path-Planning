@@ -19,6 +19,7 @@ import gymnasium as gym
 import numpy as np
 from WebotsObstacles import *
 from WebotsLines import *
+from WebotsPlanner import *
 
 
 #TODO: add continous action space option
@@ -39,13 +40,15 @@ class EnvConfig:
     def __init__(self,
                  bounds_threshold,
                  collision_threshold,
-                 obstacle_config,
+                 obstacle_config: ObstacleConfig,
+                 planner_config: PlannerConfig,
                  max_episode_steps=1000,
                  reward_func=None):
         self.bounds_threshold = bounds_threshold
         self.collision_threshold = collision_threshold
         self.max_episode_steps = max_episode_steps
         self.obstacle_config = obstacle_config
+        self.planner_config = planner_config
 
         if reward_func is not None:
             self.reward_func = reward_func 
@@ -61,7 +64,7 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         self.motor_threshold = 6.67
         # self.lidar_angle = 2 * np.pi / self.resolution  # angle per lidar reading
         self.lidar_angle = 1 / self.resolution  # angle per lidar reading
-        self.sector_count = 16  # number of sectors to divide the lidar readings into
+        self.sector_count = 18  # number of sectors to divide the lidar readings into
 
         sector_size = self.resolution // self.sector_count
         self.sector_size_half = sector_size // 2  # half sector size for bearing calculation
@@ -95,11 +98,12 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
 
         obs_low = np.array(
             [
-                1, 1, #linear, angular velocity 
-                1, 1, #x, y coord
-                1, 1, #sin, cos of robot heading
-                1, 1  #sin, cos of goal heading
-            ] + [0] * (self.sector_count * 2),
+                -1, -1, #linear, angular velocity 
+                -1, -1, #x, y coord
+                -1, -1, #sin, cos of robot heading
+                -1, -1  #sin, cos of goal heading
+                #delta lidar readings + lidar readings
+            ] + [-1] * (self.sector_count)  + [0] * (self.sector_count),
             dtype=np.float32
         )
 
@@ -109,7 +113,8 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
                 1, 1, #x, y coord
                 1, 1, #sin, cos of robot heading
                 1, 1  #sin, cos of goal heading
-            ] + [1] * (self.sector_count * 2),
+                #delta lidar readings + lidar readings
+            ] + [1] * (self.sector_count)  + [1] * (self.sector_count),
             dtype=np.float32
         )
         
@@ -132,6 +137,7 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
 
         print(f"Time step: {self.__timestep} ms")
 
+        self.planner = Planner(self.rootChildren())
         self.lineManager = LineManager(self.rootChildren())
         self.obstacleManager = ObstacleManager(self.rootChildren(), config=config.obstacle_config)
         self.obstacleManager.setCollisionThreshold(self.collision_threshold)
@@ -140,6 +146,9 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         self.keyboard = self.getKeyboard()
         self.keyboard.enable(self.__timestep)
         #endregion
+
+    def setPlannerConfig(self, planner_config: PlannerConfig):
+        self.planner.setConfig(planner_config)
 
     def seed(self, seed=None):
         np.random.seed(seed)
@@ -207,7 +216,7 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
             0.0, 0.0, #x, y coord
             np.sin(robot_heading), np.cos(robot_heading), #sin, cos of robot heading
             np.sin(goal_heading), np.cos(goal_heading)  #sin, cos of goal heading
-        ] + [1] * (self.sector_count*2),  # lidar readings
+        ] + [0] * (self.sector_count) + [1] * (self.sector_count),  # delta lidar readings + lidar readings
         dtype=np.float32)
         #endregion
 
@@ -226,19 +235,10 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         This function takes the full lidar range readings and encodes them into sectors.
         """
         #downsample lidar reading to sector_count by using circular min pooling
-        encoded_readings = np.array([], dtype=np.float32)
-        sector_size = self.resolution // self.sector_count
-        for i in range(self.sector_count):
-            start_idx = i * sector_size
-            end_idx = start_idx + sector_size
-            sector_readings = lidar_ranges[start_idx:end_idx]
-            min_reading_ind = np.argmin(sector_readings)
-
-            #append sin and cos of angle multiplied by reading, normalised by maxRange
-            angle = (start_idx + min_reading_ind) * self.lidar_angle
-            distance = min(sector_readings[min_reading_ind], self.maxRange) / self.maxRange
-            encoded_readings = np.append(encoded_readings,
-                                         [angle, distance])
+        encoded_readings = np.array(lidar_ranges).reshape(self.sector_count, -1)
+        encoded_readings = encoded_readings.min(axis=1)
+        encoded_readings = np.clip(encoded_readings / self.maxRange, 0, 1)
+        
         return encoded_readings
 
     def step(self, action):
@@ -252,9 +252,12 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         super().step(self.__timestep)
 
         # Observation
+        last_lidar_range = self.obs[-self.sector_count:]
         linear_velocity, angular_velocity = self.get_v_w(left_motor_speed, right_motor_speed)
         lidar_ranges = self.__lidar_sensor.getRangeImage()
         lidar_ranges = self.encode_lidar_readings(lidar_ranges)
+
+        delta_lidar_range = lidar_ranges - last_lidar_range
 
         robot_pos = getPosition(self.robot_node)
         robot_heading = getRotation(self.robot_node)
@@ -277,7 +280,7 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
             np.sin(heading_diff),
             np.cos(heading_diff),
         ], dtype=np.float32)
-        self.obs = np.concatenate((self.obs, lidar_ranges))
+        self.obs = np.concatenate((self.obs, delta_lidar_range, lidar_ranges))
 
         # Termination
         goal_reached = robot_pos[0] >= self.target[0] - self.collision_threshold

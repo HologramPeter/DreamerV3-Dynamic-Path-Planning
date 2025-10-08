@@ -5,10 +5,10 @@ class RewardGenerator:
         self.verbose = verbose
         self.target = np.array([1.0, 0.0])
         #angle of each of n sectors, rather than 4
-        sectors = 16
-        sector_increment = 2 * np.pi / sectors
+        self.sectors = 18
+        sector_increment = 2 * np.pi / self.sectors
         func = lambda i: i * sector_increment
-        self.sector_angles = np.array([func(i) for i in range(sectors)])
+        self.sector_angles = np.array([func(i) for i in range(self.sectors)])
 
     def setVerbose(self, verbose):
         self.verbose = verbose
@@ -28,7 +28,7 @@ class RewardGenerator:
         robot_pos = obs[2:4]  # robot x, y position
         heading_sin, heading_cos = obs[4:6]  # cos of robot heading
         heading_diff_sin, heading_diff_cos = obs[6:8]  # cos, sin of robot heading relative to goal
-        obstacle_info = obs[8:].reshape(-1, 2)  # angle, distance of obstacles
+        obstacle_dist = obs[-self.sectors:] # distance of obstacles in each sector
 
         # heading = np.arctan2(heading_sin, heading_cos) / np.pi * 180
         # heading_diff = np.arctan2(heading_diff_sin, heading_diff_cos) / np.pi * 180
@@ -39,12 +39,12 @@ class RewardGenerator:
 
         dist_to_goal = np.linalg.norm(robot_pos - self.target)
 
-        heading_reward = heading_diff_cos
+        heading_diff = heading_diff_cos
 
         # index_to_closest_obstacle = np.argmin(dist_to_obstacles)
         # dist_to_obstacles = dist_to_obstacles
 
-        obstacle_reward = 1/((obstacle_info[:, 1]*5)**2 + 0.01) #cap this to 0.01
+        obstacle_reward = 1/((obstacle_dist*5)**2 + 0.01) #cap this to 0.01
 
         # goal_reward = 1/((dist_to_goal*2) + 0.01) #exp #cap this to 0.01
         if dist_to_goal > 0.4:
@@ -55,12 +55,16 @@ class RewardGenerator:
             goal_reward = 0.0
 
         return self.compute(
-            linear_velocity, angular_velocity, dist_to_goal,
-            heading_reward, obstacle_reward, goal_reward
+            linear_velocity,
+            angular_velocity,
+            dist_to_goal,
+            heading_diff,
+            obstacle_reward,
+            goal_reward
         )
 
     def compute(self, linear_velocity, angular_velocity, dist_to_goal,
-                heading_reward, obstacle_reward, goal_reward):
+                heading_diff, obstacle_reward, goal_reward):
         return 0
 
 
@@ -72,16 +76,16 @@ class RewardGeneratorRightTurn(RewardGenerator):
         self.sectors_mul = np.array([func(angle) for angle in self.sector_angles])
 
     def compute(self, linear_velocity, angular_velocity, dist_to_goal,
-                heading_reward, obstacle_reward, goal_reward):
+                heading_diff, obstacle_reward, goal_reward):
 
         obstacle_reward = np.mean(obstacle_reward * self.sectors_mul)
         if linear_velocity < 0:
             # obstacle_reward = np.sum(obstacle_reward * self.reverse_sectors_mul)
             speed_reward = 0
-            reverse_penalty = 1
+            reverse_reward = 1
         else:
             # obstacle_reward = np.sum(obstacle_reward * self.sectors_mul)
-            reverse_penalty = 0
+            reverse_reward = 0
             if linear_velocity < 0.05:
                 speed_reward = 0.1
             else:
@@ -99,14 +103,14 @@ class RewardGeneratorRightTurn(RewardGenerator):
             - 0.5 * obstacle_reward
             + 0.3 * speed_reward
             - 0.3 * angular_reward
-            - 5.0 * reverse_penalty
-            + 6.0 * speed_reward * heading_reward
+            - 5.0 * reverse_reward
+            + 6.0 * speed_reward * heading_diff
         )
 
         self._verbose(
               f"Reward: {reward:>10.4f}, "
               f"Velocity: {linear_velocity:>6.3f}, "
-              f"Heading Reward: {heading_reward:>8.4f}, "
+              f"Heading Reward: {heading_diff:>8.4f}, "
               f"Distance to Goal: {dist_to_goal:>8.4f}, "
               f"Obstacle Reward: {obstacle_reward:>8.4f}, "
             )
@@ -120,7 +124,7 @@ class RewardGeneratorLeftTurn(RewardGenerator):
         self.sectors_mul = np.array([func(angle) for angle in self.sector_angles])
 
     def compute(self, linear_velocity, angular_velocity, dist_to_goal,
-                heading_reward, obstacle_reward, goal_reward):
+                heading_diff, obstacle_reward, goal_reward):
         obstacle_reward = np.mean(obstacle_reward * self.sectors_mul)
         if linear_velocity < 0:
             # obstacle_reward = np.sum(obstacle_reward * self.reverse_sectors_mul)
@@ -144,13 +148,13 @@ class RewardGeneratorLeftTurn(RewardGenerator):
             - 0.5 * obstacle_reward
             + 0.3 * speed_reward
             - 0.3 * angular_reward
-            + 6.0 * speed_reward * heading_reward
+            + 6.0 * speed_reward * heading_diff
         )
 
         self._verbose(
               f"Reward: {reward:>10.4f}, "
               f"Obstacle Reward: {obstacle_reward:>8.4f}, "
-              f"Heading Reward: {heading_reward:>8.4f}, "
+              f"Heading Reward: {heading_diff:>8.4f}, "
             )
         return reward
     
@@ -166,7 +170,7 @@ class RewardGeneratorSteering(RewardGenerator):
         ])
 
     def compute(self, linear_velocity, angular_velocity, dist_to_goal,
-                heading_reward, obstacle_reward, goal_reward):
+                heading_diff, obstacle_reward, goal_reward):
 
         obstacle_reward = np.mean(obstacle_reward * self.sectors_mul)
         if linear_velocity < 0:
@@ -191,7 +195,7 @@ class RewardGeneratorSteering(RewardGenerator):
             - 0.5 * obstacle_reward
             + 0.3 * speed_reward
             - 0.3 * angular_reward
-            + 6.0 * speed_reward * heading_reward
+            + 6.0 * speed_reward * heading_diff
         )
 
         self._verbose(
@@ -209,7 +213,7 @@ class RewardGeneratorDreamer(RewardGenerator):
         self.sectors_mul = np.array([func(angle) for angle in self.sector_angles])
 
     def compute(self, linear_velocity, angular_velocity, dist_to_goal,
-                heading_reward, obstacle_reward, goal_reward):
+                heading_diff, obstacle_reward, goal_reward):
 
         obstacle_reward = np.mean(obstacle_reward * self.sectors_mul)
         if linear_velocity < 0:
@@ -234,7 +238,7 @@ class RewardGeneratorDreamer(RewardGenerator):
             - 0.5 * obstacle_reward
             + 0.3 * speed_reward
             - 0.3 * angular_reward
-            + 6.0 * speed_reward * heading_reward
+            + 6.0 * speed_reward * heading_diff
         )
 
         self._verbose(

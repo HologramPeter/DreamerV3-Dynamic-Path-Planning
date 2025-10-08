@@ -19,13 +19,7 @@ setPosition = lambda node, x, y: node.getField('translation').setSFVec3f([x, y, 
 class ObstacleManager:
     #red cylindar obstacle
     protoString = """
-    # PROTO Obstacle [
-    #     field SFVec3f    translation         0 0 0
-    #     field SFRotation rotation            0 0 1 0
-    # ] {
         Solid {
-            # translation IS translation
-            # rotation IS rotation
             translation 0 0 0
             rotation 0 0 1 0
             children [
@@ -40,7 +34,6 @@ class ObstacleManager:
                 }
             ]
         }
-    # }
     """
     
     def __init__(self, root_children, config):
