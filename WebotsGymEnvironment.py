@@ -23,7 +23,7 @@ from WebotsPlanner import *
 
 
 #TODO: add continous action space option
-getPosition = lambda node: node.getField('translation').getSFVec3f()[:2]
+getPosition = lambda node: np.array(node.getField('translation').getSFVec3f()[:2])
 setPosition = lambda node, pos: node.getField('translation').setSFVec3f([pos[0], pos[1], 0.0])
 getRotation = lambda node: extractHeadingAngle(node.getField('rotation').getSFRotation())
 setRotation = lambda node, heading: node.getField('rotation').setSFRotation([0.0, 0.0, 1.0, heading])
@@ -38,17 +38,13 @@ def extractHeadingAngle(sfRotation):
 
 class EnvConfig:
     def __init__(self,
-                 bounds_threshold,
-                 collision_threshold,
-                 obstacle_config: ObstacleConfig,
                  planner_config: PlannerConfig,
+                 obstacle_config: ObstacleConfig,
                  max_episode_steps=1000,
                  reward_func=None):
-        self.bounds_threshold = bounds_threshold
-        self.collision_threshold = collision_threshold
         self.max_episode_steps = max_episode_steps
-        self.obstacle_config = obstacle_config
         self.planner_config = planner_config
+        self.obstacle_config = obstacle_config
 
         if reward_func is not None:
             self.reward_func = reward_func 
@@ -75,18 +71,12 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         self.wheel_base = 0.16
         self.maxRange = lidar_maxRange
 
-
-        self.bounds_threshold = config.bounds_threshold  # x,y bounds for the robot
-        self.collision_threshold = config.collision_threshold  # distance threshold for collision detection
+        self.bounds_threshold = config.planner_config.half_size  # x,y bounds for the robot
+        self.collision_threshold = config.obstacle_config.collision_threshold  # distance threshold for collision detection
         self.reward_func = config.reward_func
 
         self.v_high = self.motor_threshold * self.wheel_radius # linear velocity
         self.w_high = 2 * self.motor_threshold * self.wheel_radius / self.wheel_base # angular velocity
-        self.target = np.array([self.bounds_threshold, 0.0])  # target position
-
-        #TRAIN CONFIG
-        ### To be added
-        #endregion
 
         #region GYM SPACES
         action_high = np.array(
@@ -137,18 +127,18 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
 
         print(f"Time step: {self.__timestep} ms")
 
-        self.planner = Planner(self.rootChildren())
+        self.planner = Planner(config.planner_config, self.rootChildren())
         self.lineManager = LineManager(self.rootChildren())
         self.obstacleManager = ObstacleManager(self.rootChildren(), config=config.obstacle_config)
-        self.obstacleManager.setCollisionThreshold(self.collision_threshold)
+
+        self.collision_threshold = config.obstacle_config.collision_threshold
+        self.truncation = True
+        self.step_lapsed = 0
         
         # Tools
         self.keyboard = self.getKeyboard()
         self.keyboard.enable(self.__timestep)
         #endregion
-
-    def setPlannerConfig(self, planner_config: PlannerConfig):
-        self.planner.setConfig(planner_config)
 
     def seed(self, seed=None):
         np.random.seed(seed)
@@ -162,6 +152,9 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
     def setObstacleConfig(self, obstacle_config):
         self.obstacleManager.setConfig(obstacle_config)
 
+    def setPlannerConfig(self, planner_config: PlannerConfig):
+        self.planner.setConfig(planner_config)
+
     def wait_keyboard(self):
         while self.keyboard.getKey() != ord('Y'):
             super().step(self.__timestep)
@@ -171,6 +164,15 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
     
     def close(self):
         return
+    
+    def quit(self):
+        self.simulationSetMode(Supervisor.SIMULATION_MODE_PAUSE)
+    
+    def setTruncationEnabled(self, enabled: bool):
+        self.truncation = enabled
+
+    def obs_to_global(self, obs_position):
+        return self.planner.localToGlobalPosition(obs_position * self.bounds_threshold)
      
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -200,21 +202,37 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         #endregion
 
         #region INITIAL STATE
+        
+        #NOTE: only called once per run
         self.lineManager.reset()
         self.obstacleManager.reset()
-        setPosition(self.goal_node, self.target)
-        init_pos = np.random.uniform(0.0, 0.0, size=2)
-        setPosition(self.robot_node, init_pos)
-        
-        #turn the robot to a random heading
-        robot_heading = np.random.uniform(-np.pi, np.pi)
-        goal_heading = np.arctan2(self.target[1] - init_pos[1],self.target[0] - init_pos[0]) - robot_heading
-        setRotation(self.robot_node, robot_heading)
+        self.planner.reset()
+
+        #settings are in global coordinates
+        #obs are in local coordinates
+
+        target = self.planner.getCurrentTarget()
+        # print("New target:", target) #TEST
+        setPosition(self.goal_node, target)
+
+        init_position, init_heading = self.planner.localToGlobal(
+            position=np.random.uniform(-0.1, 0.1, size=2),
+            heading=np.random.uniform(-np.pi, np.pi)
+        )
+        setPosition(self.robot_node, init_position)
+        setRotation(self.robot_node, init_heading)
+
+        goal_heading = np.arctan2(target[1] - init_position[1], target[0] - init_position[0]) - init_heading
+
+        local_position, local_heading = self.planner.globalToLocal(
+            position=init_position,
+            heading=init_heading
+        )
 
         self.obs = np.array([
             0.0, 0.0, #linear, angular velocity
-            0.0, 0.0, #x, y coord
-            np.sin(robot_heading), np.cos(robot_heading), #sin, cos of robot heading
+            local_position[0], local_position[1], #x, y coord
+            np.sin(local_heading), np.cos(local_heading), #sin, cos of robot heading
             np.sin(goal_heading), np.cos(goal_heading)  #sin, cos of goal heading
         ] + [0] * (self.sector_count) + [1] * (self.sector_count),  # delta lidar readings + lidar readings
         dtype=np.float32)
@@ -261,45 +279,52 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
 
         robot_pos = getPosition(self.robot_node)
         robot_heading = getRotation(self.robot_node)
-        
-        goal_heading = np.arctan2(self.target[1] - robot_pos[1], self.target[0] - robot_pos[0])
+
+        target = self.planner.getCurrentTarget()
+        goal_heading = np.arctan2(target[1] - robot_pos[1], target[0] - robot_pos[0])
         heading_diff = goal_heading - robot_heading
 
-        #convert to degrees and round to 2 decimal places
-        # robot_heading_ = round(robot_heading / np.pi * 180, 2)
-        # goal_heading_ = round(goal_heading / np.pi * 180, 2)
-        # print(f"Robot heading: {robot_heading_}, Goal heading: {goal_heading_}")
+        local_target = self.planner.getTargetLocal()
+        local_robot_pos, local_robot_heading = self.planner.globalToLocal(robot_pos, robot_heading)
 
         self.obs = np.array([
             linear_velocity/self.v_high,
             angular_velocity/self.w_high,
-            robot_pos[0]/self.bounds_threshold,
-            robot_pos[1]/self.bounds_threshold,
-            np.sin(robot_heading),
-            np.cos(robot_heading),
+            local_robot_pos[0]/self.bounds_threshold,
+            local_robot_pos[1]/self.bounds_threshold,
+            np.sin(local_robot_heading),
+            np.cos(local_robot_heading),
             np.sin(heading_diff),
             np.cos(heading_diff),
         ], dtype=np.float32)
         self.obs = np.concatenate((self.obs, delta_lidar_range, lidar_ranges))
 
         # Termination
-        goal_reached = robot_pos[0] >= self.target[0] - self.collision_threshold
+        goal_reached = local_robot_pos[0] >= local_target[0] - self.collision_threshold
+        final_goal_reached = goal_reached and self.planner.isFinalTarget
 
         collision = self.obstacleManager.checkCollision(robot_pos[0], robot_pos[1])
         out_of_bounds = (
-            abs(robot_pos[0]) > self.bounds_threshold or
-            abs(robot_pos[1]) > self.bounds_threshold
+            abs(local_robot_pos[0]) > self.bounds_threshold or
+            abs(local_robot_pos[1]) > self.bounds_threshold
         )
         
         terminated = bool(
             collision or
-            out_of_bounds or  # out of bounds
-            goal_reached
+            (out_of_bounds and self.truncation) or  # out of bounds
+            final_goal_reached
         )
 
+        # print("Is terminated?", terminated) #TEST
+
         # Truncated
-        truncated = self.step_lapsed >= self.spec.max_episode_steps
+        truncated = self.truncation and self.step_lapsed >= self.spec.max_episode_steps
         self.step_lapsed += 1
+
+        if goal_reached or (out_of_bounds and not self.truncation):
+            self.planner.project_next_target(robot_pos)
+            target = self.planner.getCurrentTarget()
+            setPosition(self.goal_node, target)
 
         # Reward
         reward = self.reward_func(self.obs)
@@ -315,7 +340,7 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         return (self.obs.astype(np.float32),
                 reward, terminated, truncated,
                 {
-                    'success': goal_reached,
+                    'success': final_goal_reached,
                     'collision': collision,
                     'out_of_bounds': out_of_bounds,
                     'goal_heading': goal_heading,

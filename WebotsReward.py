@@ -81,11 +81,9 @@ class RewardGeneratorRightTurn(RewardGenerator):
         obstacle_reward = np.mean(obstacle_reward * self.sectors_mul)
         if linear_velocity < 0:
             # obstacle_reward = np.sum(obstacle_reward * self.reverse_sectors_mul)
-            speed_reward = 0
-            reverse_reward = 1
+            speed_reward = -0.5
         else:
             # obstacle_reward = np.sum(obstacle_reward * self.sectors_mul)
-            reverse_reward = 0
             if linear_velocity < 0.05:
                 speed_reward = 0.1
             else:
@@ -98,19 +96,16 @@ class RewardGeneratorRightTurn(RewardGenerator):
             angular_reward = max(abs(angular_velocity) - 2.0, 0)
 
         reward = (
-            - 15.0 * dist_to_goal
-            + 10.0 * goal_reward
+            - 9.0 * dist_to_goal
+            + 0.5 * goal_reward
             - 0.5 * obstacle_reward
             + 0.3 * speed_reward
             - 0.3 * angular_reward
-            - 5.0 * reverse_reward
             + 6.0 * speed_reward * heading_diff
         )
 
         self._verbose(
               f"Reward: {reward:>10.4f}, "
-              f"Velocity: {linear_velocity:>6.3f}, "
-              f"Heading Reward: {heading_diff:>8.4f}, "
               f"Distance to Goal: {dist_to_goal:>8.4f}, "
               f"Obstacle Reward: {obstacle_reward:>8.4f}, "
             )
@@ -125,6 +120,7 @@ class RewardGeneratorLeftTurn(RewardGenerator):
 
     def compute(self, linear_velocity, angular_velocity, dist_to_goal,
                 heading_diff, obstacle_reward, goal_reward):
+
         obstacle_reward = np.mean(obstacle_reward * self.sectors_mul)
         if linear_velocity < 0:
             # obstacle_reward = np.sum(obstacle_reward * self.reverse_sectors_mul)
@@ -153,21 +149,17 @@ class RewardGeneratorLeftTurn(RewardGenerator):
 
         self._verbose(
               f"Reward: {reward:>10.4f}, "
+              f"Distance to Goal: {dist_to_goal:>8.4f}, "
               f"Obstacle Reward: {obstacle_reward:>8.4f}, "
-              f"Heading Reward: {heading_diff:>8.4f}, "
             )
         return reward
     
 class RewardGeneratorSteering(RewardGenerator):
     def __init__(self, verbose=False):
         super().__init__(verbose)
-        # hard code lidar range sectors
-        self.sectors_mul = np.array([
-            0.2,   # back
-            0.4,   # left
-            1.0,   # front
-            0.4,   # right
-        ])
+        #function to map angle to sector multiplier
+        func = lambda angle: max(np.cos(angle), 0)
+        self.sectors_mul = np.array([func(angle) for angle in self.sector_angles])
 
     def compute(self, linear_velocity, angular_velocity, dist_to_goal,
                 heading_diff, obstacle_reward, goal_reward):

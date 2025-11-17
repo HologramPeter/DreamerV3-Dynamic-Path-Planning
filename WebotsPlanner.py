@@ -4,9 +4,7 @@
 transform planner class
 
 stores:
-- global_target
-- planned_target
-- planned_target_distance
+- current_target
 - current_transform
     - x, y position
     - heading
@@ -22,13 +20,9 @@ stores:
 
 import numpy as np
 
-class Transform:
-    def __init__(self, position, heading):
-        self.position = position # np.array([x, y])
-        self.heading = heading # in radians
-
 class PlannerConfig:
-    def __init__(self, target, half_size):
+    def __init__(self, start: np.ndarray, target: np.ndarray, half_size: float):
+        self.start = start # np.array([x, y])
         self.target = target # np.array([x, y])
         self.half_size = half_size # float
 
@@ -56,78 +50,117 @@ class Planner:
         }
     """
 
-    def __init__(self, root_children, config: PlannerConfig):
-        root_children.importMFNodeFromString(-1, "DEF PLANNER Group { }")
-        group = root_children.getMFNode(root_children.getCount() - 1)
-        self.field = group.getField("children")
+    def __init__(self, config: PlannerConfig, root_children = None):
+        if root_children is not None:
+            root_children.importMFNodeFromString(-1, "DEF PLANNER Group { }")
+            group = root_children.getMFNode(root_children.getCount() - 1)
+            self.field = group.getField("children")
+        else:
+            self.field = None
         self.isDisplayed = False
+        self.isFinalTarget = False
 
-        self.current_transform = Transform(np.array([0.0, 0.0]), 0.0)
-        self.global_target = None
-        self.planned_target = None
-        self.half_size = None
+        self.current_target: np.ndarray = None
+        self.current_position: np.ndarray = None
+        self.current_heading: float = None
         self.setConfig(config)
 
     def setConfig(self, config: PlannerConfig):
-        self.global_target = config.target
-        self.half_size = config.half_size
-        self.project_next_target()
+        self.config = config
+        self.reset()
 
-    def set_transform(self, transform):
-        self.current_transform = transform
-        self.project_next_target()
+    def reset(self):
+        # print("Planner reset to start", self.config.start, "target", self.config.target) #TEST
+        self.isFinalTarget = False
+        self.project_next_target(self.config.start)
 
-    def globalToLocal(self, global_point):
+    def set_position(self, position):
+        self.project_next_target(position)
+
+    def localToGlobal(self, position, heading):
+        return (
+            self.localToGlobalPosition(position),
+            self.localToGlobalHeading(heading)
+        )
+
+    def globalToLocal(self, position, heading):
+        return (
+            self.globalToLocalPosition(position),
+            self.globalToLocalHeading(heading)
+        )
+
+    def globalToLocalPosition(self, global_point):
         #transform a global point to local coordinates
-        offset = global_point - self.current_transform.position
-        c = np.cos(-self.current_transform.heading)
-        s = np.sin(-self.current_transform.heading)
+        offset = global_point - self.current_position
+        c = np.cos(-self.current_heading)
+        s = np.sin(-self.current_heading)
         rotation_matrix = np.array([[c, -s], [s, c]])
         local_point = rotation_matrix.dot(offset)
         return local_point
     
-    def localToGlobal(self, local_point):
+    def localToGlobalPosition(self, local_point):
         #transform a local point to global coordinates
-        c = np.cos(self.current_transform.heading)
-        s = np.sin(self.current_transform.heading)
+        c = np.cos(self.current_heading)
+        s = np.sin(self.current_heading)
         rotation_matrix = np.array([[c, -s], [s, c]])
-        global_point = rotation_matrix.dot(local_point) + self.current_transform.position
+        global_point = rotation_matrix.dot(local_point) + self.current_position
         return global_point
     
     def globalToLocalHeading(self, global_heading):
-        #transform a global heading to local coordinates
-        return global_heading - self.current_transform.heading
+        return global_heading - self.current_heading
 
     def localToGlobalHeading(self, local_heading):
         #transform a local heading to global coordinates
-        return local_heading + self.current_transform.heading
+        return local_heading + self.current_heading
     
-    def project_next_target(self):
+    def project_next_target(self, position):
+        if self.isFinalTarget:
+            return
         #project the next target based on current transform and global target
-        target_vector = self.global_target - self.current_transform.position
+        target_vector = self.config.target - position
+        #calculate heading
+        heading = np.arctan2(target_vector[1], target_vector[0])
+
+        self.current_position = position
+        self.current_heading = heading
+
         distance = np.linalg.norm(target_vector)
-        if distance < self.half_size:
-            self.planned_target = self.global_target
+        self.isFinalTarget = distance < self.config.half_size+0.0001
+        if self.isFinalTarget:
+            self.current_target = self.config.target
         else:
             target_vector = target_vector / distance  # normalize
-            self.planned_target = self.current_transform.position + target_vector * self.half_size
+            self.current_target = self.current_position + target_vector * self.config.half_size
+
+        #print position-target, distance, heading, current target
+        # print("Planner:", position, "to", self.config.target, ", Dist", distance, ",heading", heading, ",current target", self.current_target)  #TEST
+
         self.draw_square()
 
     def draw_square(self):
+        if self.field is None:
+            return
         if self.isDisplayed:
             self.field.removeMF(0)
             self.isDisplayed = False
         #draw a square around the current transform
-        half_size = self.planned_target_distance / 2
         corners = np.array([
-            [-half_size, -half_size],
-            [half_size, -half_size],
-            [half_size, half_size],
-            [-half_size, half_size]
+            [-self.config.half_size, -self.config.half_size],
+            [self.config.half_size, -self.config.half_size],
+            [self.config.half_size, self.config.half_size],
+            [-self.config.half_size, self.config.half_size]
         ])
-        global_corners = [self.localToGlobal(corner) for corner in corners]
+        global_corners = [self.localToGlobalPosition(corner) for corner in corners]
         point_str = ', '.join(['%f %f %f' % (p[0], p[1], 0) for p in global_corners])
         line_node_string = Planner.protoString % (point_str)
-        return line_node_string
+        self.field.importMFNodeFromString(-1, line_node_string)
+        self.isDisplayed = True
     
+    def getTransform(self):
+        return self.current_position, self.current_heading
     
+    def getCurrentTarget(self):
+        return self.current_target
+    
+    def getTargetLocal(self):
+        return self.globalToLocalPosition(self.current_target)

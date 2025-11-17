@@ -2,6 +2,7 @@ import numpy as np
 
 class ObstacleConfig:
     def __init__(self, count,
+                 collision_threshold=0.0,
                  x_range=(0,0), y_range=(0,0),
                  x_speed_range=(0,0), y_speed_range=(0,0),
                  period_range=(100,200)):
@@ -11,6 +12,7 @@ class ObstacleConfig:
         self.x_speed_range = x_speed_range
         self.y_speed_range = y_speed_range
         self.period_range = period_range
+        self.collision_threshold = collision_threshold
 
 setPosition = lambda node, x, y: node.getField('translation').setSFVec3f([x, y, 0.0])
 
@@ -42,15 +44,11 @@ class ObstacleManager:
         self.field = group.getField("children")
         self.obstacles = []
         self.config = config
-        self.collision_threshold = 0.0
         self.reset()
 
     def setConfig(self, obstacle_config):
         self.config = obstacle_config
         self.reset()
-
-    def setCollisionThreshold(self, threshold):
-        self.collision_threshold = threshold
 
     def reset(self):
         #cannot remove from group
@@ -80,7 +78,7 @@ class ObstacleManager:
         for node, info in self.obstacles:
             obs_x, obs_y = info.get_position()
             dist = np.sqrt((robot_x - obs_x)**2 + (robot_y - obs_y)**2)
-            if dist < self.collision_threshold:
+            if dist < self.config.collision_threshold:
                 return True
         return False
 

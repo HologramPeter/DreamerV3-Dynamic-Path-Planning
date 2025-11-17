@@ -2,6 +2,7 @@ from torch import nn
 import torch.nn.functional as F
 import torch
 import numpy as np
+from LatentRecovery import LatentRecovery
 
 INFERRED_DIM = 6
 
@@ -107,7 +108,6 @@ class DreamerV3():
                     # best_action = action
 
                 info[i] = {'imagined_obs_seq': imagined_seq, 'reward': total_reward}
-            print(f"Best policy index: {best_index}")
             action = self.policies[best_index](obs)
             # reshape (1,action_dim) to (action_dim,)
             action = action.squeeze()
@@ -148,6 +148,26 @@ class DreamerV3():
             state = self.rssm.img_step(state, action)
             seq.append(decoded_obs.detach().squeeze().numpy())
         return seq
+    
+    #NEW REGION: Latent Recovery
+    def initLatentRecovery(self, latent_recovery_model):
+        self.latent_recovery = latent_recovery_model.to(self.device)
+
+    def dreamPredictWithLatentRecovery(self, action, obs, heading, delta_t):
+        #feed obs and previous latent state to latent recovery model
+
+        #join state.deter and state.stoch
+        latent_t = self.state.flatten()
+        obs = torch.tensor(obs, dtype=torch.float32).view(1, -1)
+        t_delta = torch.tensor([delta_t], dtype=torch.float32).view(1,)
+        corrected_latent = self.latent_recovery(obs, latent_t, t_delta)
+
+        self.state.deter = corrected_latent[:, :self.rssm.deter_dim]
+        self.state.stoch = corrected_latent[:, self.rssm.deter_dim:]
+
+        #conduct dream predict as usual
+        return self.dreamPredict(action, obs, heading)
+
 
     #endregion
     def save(self, path):

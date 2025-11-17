@@ -3,7 +3,7 @@ import numpy as np
 import datetime
 
 def generateFileName(prefix):
-    return f"{prefix}_{datetime.datetime.now().strftime('%m%d_%H%M')}.zip"
+    return f"{prefix}-{datetime.datetime.now().strftime('%m%d_%H%M')}.zip"
 
 class NullCallback(BaseCallback):
     def __init__(self, record_path, verbose=False):
@@ -19,6 +19,9 @@ class NullCallback(BaseCallback):
         return
     
     def close(self):
+        return
+    
+    def save(self, *args):
         return
 
 class SaveObsCallback(BaseCallback):
@@ -138,3 +141,26 @@ class TensorPolicyWrapper:
         #reshape (action_dim,) to (1,1,action_dim)
         output_actions = actions.reshape(1, 1, -1)
         return output_actions
+    
+
+import random
+
+def custom_gap_sampler(latent_seq, obs_seq, max_gap=30):
+    """
+    latent_seq: Tensor [batch, T, latent_dim]
+    obs_seq: Tensor [batch, T, obs_dim]
+    max_gap: maximum allowed delta
+
+    Yields tuples (latent_t, obs_t_delta, delta_t)
+    """
+    batch_size, T, _ = latent_seq.shape
+
+    for b in range(batch_size):
+        t = 0
+        while t < T - 1:
+            # randomly choose gap length
+            delta = random.randint(1, min(max_gap, T - t - 1))
+            latent_t = latent_seq[b, t, :]
+            obs_t_delta = obs_seq[b, t + delta, :]
+            yield latent_t, obs_t_delta, delta
+            t += 1  # or t += delta if you want non-overlapping samples
