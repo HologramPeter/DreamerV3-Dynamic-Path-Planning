@@ -15,6 +15,7 @@
 
 from controller import Supervisor
 
+import torch
 import gymnasium as gym
 import numpy as np
 from WebotsObstacles import *
@@ -77,6 +78,11 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
 
         self.v_high = self.motor_threshold * self.wheel_radius # linear velocity
         self.w_high = 2 * self.motor_threshold * self.wheel_radius / self.wheel_base # angular velocity
+        
+        
+        # print(f"Max linear velocity: {self.v_high} m/s")
+        # print(f"Max angular velocity: {self.w_high} rad/s")
+        print(f"Environment bounds threshold: {self.bounds_threshold} m")
 
         #region GYM SPACES
         action_high = np.array(
@@ -141,7 +147,9 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         #endregion
 
     def seed(self, seed=None):
-        np.random.seed(seed)
+        self.random = np.random.default_rng(seed)
+        self.obstacleManager.seed(seed)
+        torch.manual_seed(seed)
 
     def rootChildren(self):
         return self.getRoot().getField('children')
@@ -216,8 +224,8 @@ class WebotsGymEnvironment(Supervisor, gym.Env):
         setPosition(self.goal_node, target)
 
         init_position, init_heading = self.planner.localToGlobal(
-            position=np.random.uniform(-0.1, 0.1, size=2),
-            heading=np.random.uniform(-np.pi, np.pi)
+            position=self.random.uniform(-0.1, 0.1, size=2),
+            heading=self.random.uniform(-np.pi, np.pi)
         )
         setPosition(self.robot_node, init_position)
         setRotation(self.robot_node, init_heading)

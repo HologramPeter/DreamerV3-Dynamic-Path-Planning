@@ -44,11 +44,15 @@ class ObstacleManager:
         self.field = group.getField("children")
         self.obstacles = []
         self.config = config
+        self.random = np.random.default_rng(0)
         self.reset()
 
     def setConfig(self, obstacle_config):
         self.config = obstacle_config
         self.reset()
+
+    def seed(self, seed=None):
+        self.random = np.random.default_rng(seed)
 
     def reset(self):
         #cannot remove from group
@@ -64,7 +68,7 @@ class ObstacleManager:
             self.obstacles.append((node, obstacle_info))
 
         for node, info in self.obstacles:
-            x,y = info.randomise(self.config)
+            x,y = info.randomise(self.config, self.random)
             setPosition(node, x, y)
 
     def step(self):
@@ -72,7 +76,7 @@ class ObstacleManager:
             reset, x, y = info.step()
             setPosition(node, x, y)
             if reset:
-                info.randomiseSpeed(self.config)
+                info.randomiseSpeed(self.config, self.random)
 
     def checkCollision(self, robot_x, robot_y):
         for node, info in self.obstacles:
@@ -92,22 +96,22 @@ class ObstacleInfo:
         self.periodicity = 0
         self.time = 0
 
-    def randomise(self, config):
-        self.x = np.random.uniform(config.x_range[0], config.x_range[1])
-        self.y = np.random.uniform(config.y_range[0], config.y_range[1])
+    def randomise(self, config, random):
+        self.x = random.uniform(config.x_range[0], config.x_range[1])
+        self.y = random.uniform(config.y_range[0], config.y_range[1])
         #if x y is within 0.5 of origin, re-randomise, max 10 times
         count = 0
         while np.sqrt(self.x**2 + self.y**2) < 0.5 or count < 10:
-            self.x = np.random.uniform(config.x_range[0], config.x_range[1])
-            self.y = np.random.uniform(config.y_range[0], config.y_range[1])
+            self.x = random.uniform(config.x_range[0], config.x_range[1])
+            self.y = random.uniform(config.y_range[0], config.y_range[1])
             count += 1
-        self.randomiseSpeed(config)
+        self.randomiseSpeed(config, random)
         return self.x, self.y
 
-    def randomiseSpeed(self, config):
-        self.x_speed = np.random.uniform(config.x_speed_range[0], config.x_speed_range[1]) * 0.0032
-        self.y_speed = np.random.uniform(config.y_speed_range[0], config.y_speed_range[1]) * 0.0032
-        self.periodicity = np.random.randint(config.period_range[0], config.period_range[1])
+    def randomiseSpeed(self, config, random):
+        self.x_speed = random.uniform(config.x_speed_range[0], config.x_speed_range[1]) * 0.0032
+        self.y_speed = random.uniform(config.y_speed_range[0], config.y_speed_range[1]) * 0.0032
+        self.periodicity = random.integers(config.period_range[0], config.period_range[1])
         self.time = 0
 
     def step(self):

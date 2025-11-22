@@ -15,9 +15,10 @@ from WebotsGymAddon import TensorPolicyWrapper, SaveObsCallback, NullCallback, g
 from WebotsReward import *
 
 from DreamerV3 import DreamerV3
+from LatentRecovery import LatentRecovery
     
 ####################### LOGGING ########################
-DATA_FOLDER = 'data_9992_1/'
+DATA_FOLDER = 'data_9992_final/'
 MODEL_FOLDER = 'models/'
 MODEL_PATH = DATA_FOLDER + MODEL_FOLDER
 if not os.path.exists(DATA_FOLDER):
@@ -42,12 +43,14 @@ def TOGGLE_CALLBACK(isOn):
     global callback
     callback.close()
     if isOn:
-        callback = SaveObsCallback(RECORD_PATH, verbose=False)
+        callback = NullCallback(RECORD_PATH, verbose=False)
+        # callback = SaveObsCallback(RECORD_PATH, verbose=False)
     else:
         callback = NullCallback(RECORD_PATH, verbose=False)
 
-DATA_LOG_PATH = getPath('performance.log')
-columns = ["name", "run_num", "steps", "success", "total_reward", "smoothness", "heading_deviation"]
+# DATA_LOG_PATH = getPath('performance_disruptive_obs.20_gap.freq.log')
+DATA_LOG_PATH = getPath('performance_disruptive_obs.20_gap.size.log')
+columns = ["name", "run_num", "steps", "success", "total_reward", "smoothness", "heading_deviation", "others"]
 if not os.path.exists(DATA_LOG_PATH):
     df = pd.DataFrame([], columns=columns)
     df.to_csv(DATA_LOG_PATH, index=False)
@@ -186,7 +189,7 @@ def summarize(name, run_count, success, steps, run_info):
 
     return pd.DataFrame([[
         name, run_count, steps, 1 if success else 0,
-        mean_reward, mean_smoothness, mean_heading_deviation]], columns=columns)
+        mean_reward, mean_smoothness, mean_heading_deviation, 0]], columns=columns)
 
 def calculate_jerk_smoothness(positions, dt=0.032):
     # positions: (N, 2), dt: time step between positions
@@ -246,7 +249,7 @@ def replay(model, name, runs):
             #print summary with column names
             print(summary.to_string(index=False))
 
-def runWithDreamer(name, dreamer, models, horizon, runs, drawLines):
+def runWithDreamer(name, dreamer, models, horizon, runs, drawLines, disruptiveLogic=None, recoveryModel=None):
     # 'dreamer_v3_44_2_128_64_16_1026_0909.zip'
     # obs_dim, action_dim, embed_dim, deter_dim, stoch_dim
     dreamer_info = dreamer.split('_')
@@ -317,6 +320,10 @@ def runWithDreamer(name, dreamer, models, horizon, runs, drawLines):
     )
 
     dreamer_v3.resetState()
+
+    if recoveryModel is not None:
+        dreamer_v3.initLatentRecovery(recoveryModel)
+
     obs, info = env.reset()
 
     action = np.zeros(env.action_space.shape)
@@ -332,13 +339,16 @@ def runWithDreamer(name, dreamer, models, horizon, runs, drawLines):
             position.append((x, y, 0.1))
         return position
     
+    empty = np.zeros(44)
     run_obs = []  #(obs, reward)
+    if disruptiveLogic:
+        disruptiveLogic.restart()
+        disruptiveLogic.reset(obs, info.get('heading', 0.0))
+    action, dream_info = dreamer_v3.dreamPredict(action, obs, info.get('heading', 0.0))
     while run_count < runs:
-        #predict horizon observation using dreamer
-        action, dream_info = dreamer_v3.dreamPredict(action, obs, info.get('heading', 0.0))
         obs, reward, terminated, truncated, info = env.step(action)
-
         run_obs.append((obs, reward))
+
         accum_reward += reward
         steps += 1
 
@@ -352,14 +362,49 @@ def runWithDreamer(name, dreamer, models, horizon, runs, drawLines):
             callback.save(action.reshape((1, -1)), obs.reshape((1, -1)), reward, terminated, truncated, info)
         if terminated or truncated:
             summary = summarize(name, run_count, info.get('success', False), steps, run_obs)
+            summary["others"] = disruptiveLogic.count
             LOG_DATA(summary)
+            if disruptiveLogic:
+                disruptiveLogic.restart()
+                disruptiveLogic.reset(obs, info.get('heading', 0.0))
             obs, info = env.reset()
             run_obs = []
             accum_reward = 0
             steps = 0
             run_count += 1
+            action, dream_info = dreamer_v3.dreamPredict(action, obs, info.get('heading', 0.0))
             #print summary with column names
             print(summary.to_string(index=False))
+            continue
+
+        if disruptiveLogic:
+            isDisruptive, delta_t = disruptiveLogic.step(obs, info.get('heading', 0.0))
+            if isDisruptive:
+                # if delta_t > 0:
+                #     print("Disruptive event started, switch to imagined rollout")
+
+                #use imagined rollout as obs and dream predict
+                if dreamer_v3.current_policy_index in dream_info.keys():
+                    policy_info = dream_info[dreamer_v3.current_policy_index]
+                    img_obs = policy_info.get('imagined_obs_seq', [empty])[0]
+                else:
+                    img_obs = empty
+                action, dream_info = dreamer_v3.dreamPredict(action, img_obs, info.get('heading', 0.0))
+            else:
+                # if delta_t > 0:
+                #     print("Disruptive event ended")
+                if recoveryModel is not None and delta_t > 0:
+                    print("Using latent recovery to correct latent state")
+                    obs = disruptiveLogic.last_known_obs
+                    heading = disruptiveLogic.last_heading
+                    action, dream_info = dreamer_v3.dreamPredictWithLatentRecovery(action, obs, heading, delta_t)
+                else:
+                    action, dream_info = dreamer_v3.dreamPredict(action, obs, info.get('heading', 0.0))
+        else:
+            #predict horizon observation using dreamer
+            action, dream_info = dreamer_v3.dreamPredict(action, obs, info.get('heading', 0.0))
+
+
 
 def train(model, name, train_steps):
     if model:
@@ -381,6 +426,45 @@ def train(model, name, train_steps):
     agent.save(getModelPath(name))
     print(f"Model saved as {name}")
     return name
+
+class DisruptiveLogic:
+    def __init__(self, normal_range=(100, 150), gap_range = (5, 20)):
+        self.gap_size = 0.032
+        self.normal_range = normal_range
+        self.gap_range = gap_range
+        self.last_known_obs = None
+        self.last_heading = None
+        self.counter = 0
+        self.current_gap = 0
+        self.isDisruptive = False
+        self.count = 0
+
+    def restart(self):
+        self.count = 0
+
+    def reset(self, last_known_obs, last_heading):
+        self.last_known_obs = last_known_obs
+        self.last_heading = last_heading
+
+        self.counter = 0
+        #toggle for disruptive gap or normal gap
+        self.isDisruptive = not self.isDisruptive
+
+        if self.isDisruptive:
+            self.current_gap = np.random.randint(*self.gap_range)
+            self.count += 1
+        else:
+            self.current_gap = np.random.randint(*self.normal_range)
+
+    def step(self, obs, heading):
+        self.counter += 1
+        if self.counter >= self.current_gap:
+            delta_t = self.counter * 0.032
+            self.reset(obs, heading)
+            return self.isDisruptive, delta_t
+        return self.isDisruptive, 0
+
+
 
 if __name__ == '__main__':
     #################TRAINING#######################
@@ -478,11 +562,11 @@ if __name__ == '__main__':
     #     'td3-Sp2.5-Obs30-Steering-1010_1858.zip',
     # ]
 
-    replay_list = getModels()
+    # replay_list = getModels()
 
-    obstacleConfig, obstacleMult = setEnvTrainingEnabled(True)
-    verbose = False
-    models = [extractInfo(model, obstacleMult, verbose) for model in replay_list]
+    # obstacleConfig, obstacleMult = setEnvTrainingEnabled(True)
+    # verbose = False
+    # models = [extractInfo(model, obstacleMult, verbose) for model in replay_list]
 
     # base_section(
     #     obstacleConfig=obstacleConfig,
@@ -494,7 +578,17 @@ if __name__ == '__main__':
 
     #################Dreamer PERFORMANCE#######################
 
-    def dreamer_section(obstacleConfig, obstacleMult, dreamers, runs, verbose):
+    def dreamer_section(obstacleConfig, obstacleMult, dreamers, runs, verbose, disruptiveLogic=None, recoveryModel=None):
+        if recoveryModel is not None:
+            path = getPath(recoveryModel)
+            recoveryModel = LatentRecovery(44, 80, [64,32])
+            recoveryModel.load_state_dict(torch.load(path, weights_only=True))
+            recoveryModel.eval()
+
+        #join disruptive logic gap as lower.upper
+        disruptiveInfo = f'norm.{disruptiveLogic.normal_range[0]}.{disruptiveLogic.normal_range[1]}_' + \
+                    f'gap.{disruptiveLogic.gap_range[0]}.{disruptiveLogic.gap_range[1]}'
+
         for obs_num, speed, dreamer, models in dreamers:
             obstacleConfig.count = int(obs_num * obstacleMult)
             obstacleConfig.x_speed_range = (-speed, speed)
@@ -505,14 +599,35 @@ if __name__ == '__main__':
 
             for horizon in [30]:
                 env.setRewardFunction(reward_generator)
+
+                print("Running with latent recovery disabled")
                 env.seed(SEED)
                 runWithDreamer(
-                    name=f'dreamer_obs{obs_num}',
+                    name=f'dreamer_obs.{obs_num}_{disruptiveInfo}',
                     dreamer=dreamer,
                     models=models,
                     horizon=horizon,
                     runs=runs,
-                    drawLines=False
+                    drawLines=True,
+                    disruptiveLogic=disruptiveLogic,
+                    recoveryModel=None,
+                )
+                callback.nextRollout()
+                
+                if recoveryModel is None:
+                    continue
+                
+                print("Running with latent recovery enabled")
+                env.seed(SEED)
+                runWithDreamer(
+                    name=f'dreamer_obs.{obs_num}_{disruptiveInfo}_recovery',
+                    dreamer=dreamer,
+                    models=models,
+                    horizon=horizon,
+                    runs=runs,
+                    drawLines=False,
+                    disruptiveLogic=disruptiveLogic,
+                    recoveryModel=recoveryModel,
                 )
                 callback.nextRollout()
 
@@ -520,29 +635,47 @@ if __name__ == '__main__':
 
 
     dreamers = [
-            ( 10, 2.5, 'dreamer_v3_44_2_128_64_16_1026_0909.zip',
-             [
-                'td3-Sp2.5-Obs10-Left-1026_2341.zip',
-                'td3-Sp2.5-Obs10-Right-1026_2336.zip',
-                'td3-Sp2.5-Obs10-Steering-1026_2347.zip',
-             ]),
-             ( 20, 2.5, 'dreamer_v3_44_2_128_64_16_1026_0909.zip', 
+            # ( 10, 2.5, 'dreamer_v3_44_2_128_64_16_1026_0909.zip',
+            #  [
+            #     'td3-Sp2.5-Obs10-Left-1026_2341.zip',
+            #     'td3-Sp2.5-Obs10-Right-1026_2336.zip',
+            #     'td3-Sp2.5-Obs10-Steering-1026_2347.zip',
+            #  ]),
+             ( 20, 2.5, 'dreamer_v3_44_2_128_64_16_1122_1358.zip', 
              [
                 'td3-Sp2.5-Obs20-Left-1026_2358.zip',
                 'td3-Sp2.5-Obs20-Right-1026_2352.zip',
                 'td3-Sp2.5-Obs20-Steering-1027_0004.zip',
              ]),
-             ( 30, 2.5, 'dreamer_v3_44_2_128_64_16_1026_0909.zip', 
-             [
-                'td3-Sp2.5-Obs30-Left-1027_0015.zip',
-                'td3-Sp2.5-Obs30-Right-1027_0009.zip',
-                'td3-Sp2.5-Obs30-Steering-1027_0023.zip',
-             ]),
+            #  ( 30, 2.5, 'dreamer_v3_44_2_128_64_16_1122_1358.zip', 
+            #  [
+            #     'td3-Sp2.5-Obs30-Left-1027_0015.zip',
+            #     'td3-Sp2.5-Obs30-Right-1027_0009.zip',
+            #     'td3-Sp2.5-Obs30-Steering-1027_0023.zip',
+            #  ]),
         ]
+
+    recoveryModel = 'recoveryModule_1122_1422.pt'
+    disruptiveLogic = [
+        DisruptiveLogic(normal_range=(60, 70), gap_range=(0, 5)),
+        DisruptiveLogic(normal_range=(60, 70), gap_range=(5, 10)),
+        DisruptiveLogic(normal_range=(60, 70), gap_range=(10, 15)),
+        DisruptiveLogic(normal_range=(60, 70), gap_range=(15, 20)),
+        DisruptiveLogic(normal_range=(60, 70), gap_range=(20, 30)),
+        # DisruptiveLogic(normal_range=(50, 60), gap_range=(5, 10)),
+        # DisruptiveLogic(normal_range=(40, 50), gap_range=(5, 10)),
+        # DisruptiveLogic(normal_range=(30, 40), gap_range=(5, 10)),
+        # DisruptiveLogic(normal_range=(20, 30), gap_range=(5, 10)),
+        # DisruptiveLogic(normal_range=(10, 20), gap_range=(5, 10)),
+    ]
 
     verbose = False
     obstacleConfig, obstacleMult = setEnvTrainingEnabled(True)
-    dreamer_section(obstacleConfig, obstacleMult, dreamers, RUNS, verbose=verbose)
+
+    for logic in disruptiveLogic:
+        dreamer_section(obstacleConfig, obstacleMult, dreamers, RUNS, verbose=verbose,
+                        disruptiveLogic=logic,
+                        recoveryModel=recoveryModel)
     env.quit()
     exit(0)
 

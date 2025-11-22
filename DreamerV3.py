@@ -2,9 +2,8 @@ from torch import nn
 import torch.nn.functional as F
 import torch
 import numpy as np
-from LatentRecovery import LatentRecovery
 
-INFERRED_DIM = 6
+INFERRED_DIM = 8
 
 class DreamerV3():
     def __init__(self, embed_dim, obs_dim, action_dim, deter_dim, stoch_dim, device):
@@ -12,6 +11,10 @@ class DreamerV3():
         self.rssm = RSSM(embed_dim=embed_dim, action_dim=action_dim, deter_dim=deter_dim, stoch_dim=stoch_dim).to(device)
         self.decoder = Decoder(latent_dim=deter_dim+stoch_dim, output_dim=obs_dim-INFERRED_DIM).to(device)
         self.device = device
+
+        self.v_high = 0.22011
+        self.w_high = 2.751375
+        self.bounds_threshold = 3.0
 
     def parameters(self):
         return (
@@ -40,6 +43,21 @@ class DreamerV3():
             recon.append(self.decoder(post_state[t]))
         recon = torch.stack(recon, dim=0)
         return recon, post_dist, prior_dist
+    
+    def forward_latent(self, obs, actions):
+        seq_len = obs.size(0)
+
+        embeds = []
+        for t in range(seq_len):
+            embeds.append(self.encoder(obs[t]))
+        embeds = torch.stack(embeds, dim=0)
+
+        # Observe RSSM states from embeddings and actions
+        post_seq, prior_seq = self.observe(embeds, actions)
+        post_state, post_dist = RSSMState.stack(post_seq)
+        prior_state, prior_dist = RSSMState.stack(prior_seq)
+
+        return prior_state, post_state
 
     def observe(self, embeds, actions):
         # embeds (seq_len, batch_size, EMBED_DIM)
@@ -117,19 +135,35 @@ class DreamerV3():
             return action, info
 
     def infer_obs(self, prev_action, prev_state, heading, decoded_obs):
+        # 1, 1, #linear, angular velocity 
+        # 1, 1, #x, y coord
+        # 1, 1, #sin, cos of robot heading
+        # 1, 1  #sin, cos of goal heading
         left_motor_speed = prev_action[0][0] * self.max_wheel_speed
         right_motor_speed = prev_action[0][1] * self.max_wheel_speed
-        x, y = prev_state[2:4]
+        x, y = prev_state[2:4] * self.bounds_threshold
 
         linear_velocity, angular_velocity = self.get_v_w(left_motor_speed, right_motor_speed)
+        
         x += linear_velocity * np.cos(heading) * self.step_size
         y += linear_velocity * np.sin(heading) * self.step_size
-        heading += angular_velocity * self.step_size
 
-        goal_heading = np.arctan2(-y, -x)
+        x /= self.bounds_threshold
+        y /= self.bounds_threshold
+
+        linear_velocity /= self.v_high
+        angular_velocity /= self.w_high
+
+        heading += angular_velocity * self.step_size
+        goal_heading = np.arctan2(-y, 1-x)
         heading_diff = (goal_heading - heading + np.pi) % (2 * np.pi) - np.pi
 
-        inferred_obs = torch.tensor([linear_velocity, angular_velocity, x, y, np.sin(heading_diff), np.cos(heading_diff)]).reshape(1, 1, -1)
+        inferred_obs = torch.tensor([
+            linear_velocity, angular_velocity,
+            x, y,
+            np.sin(heading), np.cos(heading),
+            np.sin(heading_diff), np.cos(heading_diff)
+            ]).reshape(1, 1, -1)
         pred_obs = torch.cat((inferred_obs, decoded_obs), dim=2)
         return pred_obs, heading
 
@@ -158,12 +192,12 @@ class DreamerV3():
 
         #join state.deter and state.stoch
         latent_t = self.state.flatten()
-        obs = torch.tensor(obs, dtype=torch.float32).view(1, -1)
-        t_delta = torch.tensor([delta_t], dtype=torch.float32).view(1,)
+        obs = torch.from_numpy(obs).float().unsqueeze(0)
+        t_delta = torch.tensor([delta_t], dtype=torch.float32).unsqueeze(0)
         corrected_latent = self.latent_recovery(obs, latent_t, t_delta)
 
-        self.state.deter = corrected_latent[:, :self.rssm.deter_dim]
-        self.state.stoch = corrected_latent[:, self.rssm.deter_dim:]
+        self.state.deter = self.state.deter + corrected_latent[:, :self.rssm.deter_dim]
+        self.state.stoch = self.state.stoch + corrected_latent[:, self.rssm.deter_dim:]
 
         #conduct dream predict as usual
         return self.dreamPredict(action, obs, heading)
