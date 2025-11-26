@@ -48,12 +48,15 @@ def TOGGLE_CALLBACK(isOn):
     else:
         callback = NullCallback(RECORD_PATH, verbose=False)
 
-# DATA_LOG_PATH = getPath('performance_disruptive_obs.20_gap.freq.log')
-DATA_LOG_PATH = getPath('performance_disruptive_obs.20_gap.size.log')
+DATA_LOG_PATH = getPath("default_log.log")
 columns = ["name", "run_num", "steps", "success", "total_reward", "smoothness", "heading_deviation", "others"]
-if not os.path.exists(DATA_LOG_PATH):
-    df = pd.DataFrame([], columns=columns)
-    df.to_csv(DATA_LOG_PATH, index=False)
+
+def useDataLogger(path):
+    global DATA_LOG_PATH
+    DATA_LOG_PATH = path
+    if not os.path.exists(DATA_LOG_PATH):
+        df = pd.DataFrame([], columns=columns)
+        df.to_csv(DATA_LOG_PATH, index=False)
 
 def LOG_DATA(df):
     df.to_csv(DATA_LOG_PATH, mode='a', header=False, index=False)
@@ -362,7 +365,8 @@ def runWithDreamer(name, dreamer, models, horizon, runs, drawLines, disruptiveLo
             callback.save(action.reshape((1, -1)), obs.reshape((1, -1)), reward, terminated, truncated, info)
         if terminated or truncated:
             summary = summarize(name, run_count, info.get('success', False), steps, run_obs)
-            summary["others"] = disruptiveLogic.count
+            if disruptiveLogic:
+                summary["others"] = disruptiveLogic.count
             LOG_DATA(summary)
             if disruptiveLogic:
                 disruptiveLogic.restart()
@@ -394,7 +398,7 @@ def runWithDreamer(name, dreamer, models, horizon, runs, drawLines, disruptiveLo
                 # if delta_t > 0:
                 #     print("Disruptive event ended")
                 if recoveryModel is not None and delta_t > 0:
-                    print("Using latent recovery to correct latent state")
+                    # print("Using latent recovery to correct latent state")
                     obs = disruptiveLogic.last_known_obs
                     heading = disruptiveLogic.last_heading
                     action, dream_info = dreamer_v3.dreamPredictWithLatentRecovery(action, obs, heading, delta_t)
@@ -578,7 +582,7 @@ if __name__ == '__main__':
 
     #################Dreamer PERFORMANCE#######################
 
-    def dreamer_section(obstacleConfig, obstacleMult, dreamers, runs, verbose, disruptiveLogic=None, recoveryModel=None):
+    def dreamer_section(obstacleConfig, obstacleMult, dreamers, runs, verbose, horizons, disruptiveLogic=None, recoveryModel=None):
         if recoveryModel is not None:
             path = getPath(recoveryModel)
             recoveryModel = LatentRecovery(44, 80, [64,32])
@@ -586,8 +590,11 @@ if __name__ == '__main__':
             recoveryModel.eval()
 
         #join disruptive logic gap as lower.upper
-        disruptiveInfo = f'norm.{disruptiveLogic.normal_range[0]}.{disruptiveLogic.normal_range[1]}_' + \
-                    f'gap.{disruptiveLogic.gap_range[0]}.{disruptiveLogic.gap_range[1]}'
+        if disruptiveLogic is None:
+            disruptiveInfo = 'nodisruptive'
+        else:
+            disruptiveInfo = f'norm.{disruptiveLogic.normal_range[0]}.{disruptiveLogic.normal_range[1]}_' + \
+                        f'gap.{disruptiveLogic.gap_range[0]}.{disruptiveLogic.gap_range[1]}'
 
         for obs_num, speed, dreamer, models in dreamers:
             obstacleConfig.count = int(obs_num * obstacleMult)
@@ -597,22 +604,23 @@ if __name__ == '__main__':
 
             reward_generator = RewardGeneratorSteering(verbose=verbose)
 
-            for horizon in [30]:
+            for horizon in horizons:
+            # for horizon in horizons:
                 env.setRewardFunction(reward_generator)
 
-                print("Running with latent recovery disabled")
-                env.seed(SEED)
-                runWithDreamer(
-                    name=f'dreamer_obs.{obs_num}_{disruptiveInfo}',
-                    dreamer=dreamer,
-                    models=models,
-                    horizon=horizon,
-                    runs=runs,
-                    drawLines=True,
-                    disruptiveLogic=disruptiveLogic,
-                    recoveryModel=None,
-                )
-                callback.nextRollout()
+                # print("Running with latent recovery disabled")
+                # env.seed(SEED)
+                # runWithDreamer(
+                #     name=f'dreamer_h.{horizon}_obs.{obs_num}_{disruptiveInfo}',
+                #     dreamer=dreamer,
+                #     models=models,
+                #     horizon=horizon,
+                #     runs=runs,
+                #     drawLines=False,
+                #     disruptiveLogic=disruptiveLogic,
+                #     recoveryModel=None,
+                # )
+                # callback.nextRollout()
                 
                 if recoveryModel is None:
                     continue
@@ -620,7 +628,7 @@ if __name__ == '__main__':
                 print("Running with latent recovery enabled")
                 env.seed(SEED)
                 runWithDreamer(
-                    name=f'dreamer_obs.{obs_num}_{disruptiveInfo}_recovery',
+                    name=f'dreamer_h.{horizon}_obs.{obs_num}_{disruptiveInfo}_recovery_resetHorizon',
                     dreamer=dreamer,
                     models=models,
                     horizon=horizon,
@@ -641,41 +649,109 @@ if __name__ == '__main__':
             #     'td3-Sp2.5-Obs10-Right-1026_2336.zip',
             #     'td3-Sp2.5-Obs10-Steering-1026_2347.zip',
             #  ]),
+             ( 30, 2.5, 'dreamer_v3_44_2_128_64_16_1122_1358.zip', 
+             [
+                'td3-Sp2.5-Obs30-Left-1027_0015.zip',
+                'td3-Sp2.5-Obs30-Right-1027_0009.zip',
+                'td3-Sp2.5-Obs30-Steering-1027_0023.zip',
+             ]),
+        ]
+
+    recoveryModel = 'recoveryModule_1122_1422.pt'
+    disruptiveLogicGap = [
+        DisruptiveLogic(normal_range=(60, 70), gap_range=(0, 5)),
+        DisruptiveLogic(normal_range=(60, 70), gap_range=(5, 10)),
+        DisruptiveLogic(normal_range=(60, 70), gap_range=(10, 15)),
+        DisruptiveLogic(normal_range=(60, 70), gap_range=(15, 20)),
+        DisruptiveLogic(normal_range=(60, 70), gap_range=(20, 30)),
+    ]
+
+    disruptiveLogicFreq = [
+        DisruptiveLogic(normal_range=(50, 60), gap_range=(5, 10)),
+        DisruptiveLogic(normal_range=(40, 50), gap_range=(5, 10)),
+        DisruptiveLogic(normal_range=(30, 40), gap_range=(5, 10)),
+        DisruptiveLogic(normal_range=(20, 30), gap_range=(5, 10)),
+        DisruptiveLogic(normal_range=(10, 20), gap_range=(5, 10)),
+    ]
+
+    # DATA_LOG_PATH = getPath('performance_disruptive_obs.20_gap.freq.log')
+    # DATA_LOG_PATH = 
+
+    verbose = False
+    obstacleConfig, obstacleMult = setEnvTrainingEnabled(True)
+
+    #horizon
+    # useDataLogger(
+    #     getPath('performance_obs.30_horizon.log')
+    # )
+    # dreamer_section(obstacleConfig, obstacleMult, dreamers, RUNS, verbose=verbose,
+    #                     horizons=range(30,151,30),
+    #                     disruptiveLogic=None,
+    #                     recoveryModel=None)
+
+    # useDataLogger(
+    #     getPath('performance_disruptive_h.reset_obs.30_gap.size.log')
+    # )
+    # for logic in disruptiveLogicGap:
+    #     dreamer_section(obstacleConfig, obstacleMult, dreamers, RUNS, verbose=verbose,
+    #                     horizons=[30],
+    #                     disruptiveLogic=logic,
+    #                     recoveryModel=recoveryModel)
+        
+    # env.quit()
+    # exit(0)
+        
+    # useDataLogger(
+    #     getPath('performance_disruptive_h.reset_obs.30_gap.freq.log')
+    # )
+    # for logic in disruptiveLogicFreq:
+    #     dreamer_section(obstacleConfig, obstacleMult, dreamers, RUNS, verbose=verbose,
+    #                     horizons=[30],
+    #                     disruptiveLogic=logic,
+    #                     recoveryModel=recoveryModel)
+    # env.quit()
+    # exit(0)
+        
+    ###########################################################
+
+    dreamers = [
              ( 20, 2.5, 'dreamer_v3_44_2_128_64_16_1122_1358.zip', 
              [
                 'td3-Sp2.5-Obs20-Left-1026_2358.zip',
                 'td3-Sp2.5-Obs20-Right-1026_2352.zip',
                 'td3-Sp2.5-Obs20-Steering-1027_0004.zip',
              ]),
-            #  ( 30, 2.5, 'dreamer_v3_44_2_128_64_16_1122_1358.zip', 
-            #  [
-            #     'td3-Sp2.5-Obs30-Left-1027_0015.zip',
-            #     'td3-Sp2.5-Obs30-Right-1027_0009.zip',
-            #     'td3-Sp2.5-Obs30-Steering-1027_0023.zip',
-            #  ]),
         ]
+    
 
-    recoveryModel = 'recoveryModule_1122_1422.pt'
-    disruptiveLogic = [
-        DisruptiveLogic(normal_range=(60, 70), gap_range=(0, 5)),
-        DisruptiveLogic(normal_range=(60, 70), gap_range=(5, 10)),
-        DisruptiveLogic(normal_range=(60, 70), gap_range=(10, 15)),
-        DisruptiveLogic(normal_range=(60, 70), gap_range=(15, 20)),
-        DisruptiveLogic(normal_range=(60, 70), gap_range=(20, 30)),
-        # DisruptiveLogic(normal_range=(50, 60), gap_range=(5, 10)),
-        # DisruptiveLogic(normal_range=(40, 50), gap_range=(5, 10)),
-        # DisruptiveLogic(normal_range=(30, 40), gap_range=(5, 10)),
-        # DisruptiveLogic(normal_range=(20, 30), gap_range=(5, 10)),
-        # DisruptiveLogic(normal_range=(10, 20), gap_range=(5, 10)),
-    ]
+    # useDataLogger(
+    #     getPath('performance_obs.20_horizon.log')
+    # )
+    # dreamer_section(obstacleConfig, obstacleMult, dreamers, RUNS, verbose=verbose,
+    #                     horizons=range(30,151,30),
+    #                     disruptiveLogic=None,
+    #                     recoveryModel=None)
 
-    verbose = False
-    obstacleConfig, obstacleMult = setEnvTrainingEnabled(True)
-
-    for logic in disruptiveLogic:
+    useDataLogger(
+        getPath('performance_disruptive_h.reset_obs.20_gap.size.log')
+    )
+    for logic in disruptiveLogicGap:
         dreamer_section(obstacleConfig, obstacleMult, dreamers, RUNS, verbose=verbose,
+                        horizons=[30],
                         disruptiveLogic=logic,
                         recoveryModel=recoveryModel)
+    # env.quit()
+    # exit(0)
+
+    useDataLogger(
+        getPath('performance_disruptive_h.reset_obs.20_gap.freq.log')
+    )
+    for logic in disruptiveLogicFreq:
+        dreamer_section(obstacleConfig, obstacleMult, dreamers, RUNS, verbose=verbose,
+                        horizons=[30],
+                        disruptiveLogic=logic,
+                        recoveryModel=recoveryModel)
+
     env.quit()
     exit(0)
 

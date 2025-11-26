@@ -199,6 +199,9 @@ class DreamerV3():
         self.state.deter = self.state.deter + corrected_latent[:, :self.rssm.deter_dim]
         self.state.stoch = self.state.stoch + corrected_latent[:, self.rssm.deter_dim:]
 
+        # TOGGLE: reset policy horizon as it no longer applies
+        self.current_policy_horizon = 0
+
         #conduct dream predict as usual
         return self.dreamPredict(action, obs, heading)
 
